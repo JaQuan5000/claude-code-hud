@@ -11,7 +11,7 @@
 import { expect, test } from 'claude-code/testing';
 
 import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
-import { bar, fit, layout, buildGroups, percentText, modelText, resetText, tone, width } from '../hooks/hud-format.js';
+import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
     fastModel: 'haiku',
@@ -136,41 +136,75 @@ test('small work is never held back, since holding it saves nothing', async () =
     expect(chooseModel('fast', tight, OPTS).model).toBe('haiku');
 });
 
-test('a bar is always its stated width', async () => {
+test('a bar is always its stated width, brackets included', async () => {
     for (const pct of [0, 1, 37, 99, 100, -5, 140]) {
         for (const cells of [10, 8]) {
-            const { filled, empty } = bar(pct, cells);
-            expect(filled.length + empty.length).toBe(cells);
+            expect(barText(pct, cells).length).toBe(cells);
         }
     }
 });
 
-test('both halves of a bar are the same character, so they cannot differ in height', async () => {
-    // A full block paired with a shade character looks like one bar in some
-    // fonts and a broken staircase in others. One glyph can't disagree with
-    // itself, and colour carries filled against empty.
-    for (const pct of [0, 1, 50, 99, 100]) {
-        const { filled, empty } = bar(pct, 10);
-        const glyphs = new Set((filled + empty).split(''));
-        expect(glyphs.size <= 1).toBe(true);
-        if (glyphs.size === 1) expect([...glyphs][0]).toBe('\u2588');
+test('a bar is bracketed, so its extent is visible even when nearly empty', async () => {
+    // Without the frame you cannot see where a 4% bar ends, and the strip
+    // reads as loose characters rather than as a gauge.
+    for (const pct of [0, 4, 50, 100]) {
+        const text = barText(pct, 10);
+        expect(text.startsWith('[')).toBe(true);
+        expect(text.endsWith(']')).toBe(true);
     }
 });
 
 test('a bar distinguishes empty, nearly empty, nearly full and full', async () => {
-    // 4% drawing as empty would read as a window nobody has touched.
-    expect(bar(0, 10).filled).toBe('');
-    expect(bar(0, 10).empty.length).toBe(10);
-    expect(bar(4, 10).filled.length).toBe(1);
-    expect(bar(99, 10).empty.length).toBe(1);
-    expect(bar(100, 10).filled.length).toBe(10);
-    expect(bar(100, 10).empty).toBe('');
+    // 4% drawing as empty would read as a window nobody has touched, and
+    // 99% drawing as full would read as one already gone.
+    expect(barText(0, 10)).toBe('[········]');
+    expect(barText(100, 10)).toBe('[████████]');
+    expect(barText(4, 10).indexOf('·') > 1).toBe(true);
+    expect(barText(99, 10).indexOf('·')).toBe(-1);
+    expect(barText(99, 10)).not.toBe(barText(100, 10));
+});
+
+test('the leading edge is what makes ten columns say more than eleven things', async () => {
+    // Whole cells give 11 distinct bars across the range. Eighths give 81,
+    // which is the difference between seeing 77% move to 81% and not.
+    const seen = new Set();
+    for (let p = 0; p <= 100; p += 1) seen.add(barText(p, 10));
+    expect(seen.size > 60).toBe(true);
+    expect(barText(40, 10)).not.toBe(barText(43, 10));
+    expect(barText(77, 10)).not.toBe(barText(79, 10));
+});
+
+test('the fill is coloured by zone, so a full window shows how it got there', async () => {
+    // At 91% the bar runs green, then amber, then red along its length.
+    const colours = barPieces(91, 10).filter((p) => p.color).map((p) => p.color);
+    expect(colours.includes('green')).toBe(true);
+    expect(colours.includes('yellow')).toBe(true);
+    expect(colours.includes('red')).toBe(true);
+
+    // At 31% there is nothing but green in it.
+    const calm = barPieces(31, 10).filter((p) => p.color).map((p) => p.color);
+    expect(calm.every((c) => c === 'green')).toBe(true);
+});
+
+test('same-coloured cells are merged, so a bar is a few elements not ten', async () => {
+    expect(barPieces(100, 10).length <= 6).toBe(true);
+});
+
+test('the bar uses no ambiguous-width character, which would break alignment', async () => {
+    // Filled and hollow squares or circles would read better, and are East
+    // Asian Ambiguous width: some terminals draw them double-width and the
+    // whole strip loses its columns.
+    const AMBIGUOUS = /[■□▪▫●○◼◻⬛⬜]/;
+    for (const ascii of [false, true]) {
+        for (const pct of [0, 33, 66, 100]) {
+            expect(AMBIGUOUS.test(barText(pct, 10, ascii))).toBe(false);
+        }
+    }
 });
 
 test('the ascii bar is for a terminal that is not in UTF-8', async () => {
-    const { filled, empty } = bar(50, 4, true);
-    expect(filled).toBe('##');
-    expect(empty).toBe('##');
+    expect(barText(50, 10, true)).toBe('[####....]');
+    expect(/[^\x20-\x7e]/.test(barText(50, 10, true))).toBe(false);
 });
 
 test('percentages and model names keep a fixed width, so nothing jitters', async () => {
@@ -191,11 +225,23 @@ test('a reset inside the day is a clock time, and beyond it a weekday', async ()
 });
 
 test('the colour changes at the thresholds and nowhere else', async () => {
+    // Green to 55, amber 56 to 85, red 86 and up.
     expect(tone(0)).toBe('green');
-    expect(tone(59)).toBe('green');
-    expect(tone(60)).toBe('yellow');
-    expect(tone(84)).toBe('yellow');
-    expect(tone(85)).toBe('red');
+    expect(tone(55)).toBe('green');
+    expect(tone(56)).toBe('yellow');
+    expect(tone(85)).toBe('yellow');
+    expect(tone(86)).toBe('red');
+    expect(tone(100)).toBe('red');
+});
+
+test('a fractional reading takes the colour of the number that is printed', async () => {
+    // 85.6 prints as 86%, so it has to be red. Comparing before rounding
+    // would put a red number beside an amber bar.
+    expect(tone(55.4)).toBe('green');
+    expect(tone(55.6)).toBe('yellow');
+    expect(tone(85.4)).toBe('yellow');
+    expect(tone(85.6)).toBe('red');
+    expect(percentText(85.6).trim()).toBe('86%');
 });
 
 const FULL = {
@@ -244,11 +290,14 @@ test('an unknown rate-limit window is left out rather than printed raw', async (
 });
 
 test('a roomy window gets the full bar width', async () => {
-    // The bar is two pieces now, so measure the run of blocks, not one piece.
+    // The bar is several pieces now, so measure from bracket to bracket.
     const pieces = layout(FULL, 120, OPTS);
-    const blocks = pieces.filter((p) => /^█+$/.test(p.text));
-    expect(blocks.length >= 2).toBe(true);
-    expect(blocks.slice(0, 2).reduce((n, p) => n + p.text.length, 0)).toBe(OPTS.barCells);
+    const open = pieces.findIndex((p) => p.text === '[');
+    expect(open >= 0).toBe(true);
+    let w = 0;
+    let k = open;
+    while (k < pieces.length) { w += pieces[k].text.length; if (pieces[k].text === ']') break; k += 1; }
+    expect(w).toBe(OPTS.barCells);
 });
 
 test('a narrow window narrows the bars rather than losing a reading', async () => {

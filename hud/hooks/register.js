@@ -14,7 +14,8 @@
  * that overrode your own `/model` on the next message would be intolerable.
  */
 
-import { layout } from './hud-format.js';
+import { layout, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
+import { gaugeSvg, gaugeAlt } from './hud-svg.js';
 import { classify, chooseModel } from './hud-route.js';
 
 /**
@@ -167,9 +168,9 @@ export function register(on, options = {}) {
     // The strip itself. Drawn from `state` alone, so this stays cheap: the
     // numbers were gathered when they changed, not here.
     on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-        if (state.contextPercent == null && !state.rateLimits.length) return next(e);
-
-        const { Box, Text } = $.ui.resolve(e);
+        // No early return for "nothing measured yet": the model is always
+        // worth saying, and a strip that appears a turn late looks broken.
+        const { Box, Text, Svg } = $.ui.resolve(e);
         let model = state.chosen;
         if (!model) {
             try {
@@ -182,16 +183,53 @@ export function register(on, options = {}) {
             }
         }
 
-        const pieces = layout({ ...state, model }, e.props && e.props.bodyColumns, opts);
-        const strip = Box({
-            flexDirection: 'row',
-            children: pieces.map((p, i) => Text({
-                key: 'hud-' + i,
-                color: p.color,
-                dimColor: !!p.dim,
-                children: [p.text],
-            })),
-        });
+        let strip;
+        if (e.surface === 'desktop' && typeof Svg === 'function') {
+            // The Desktop app draws vector art, so it gets a real gauge
+            // rather than a drawing made of characters. Labels stay as Text,
+            // which follows the app's light or dark theme; only the gauges
+            // are pictures, and nothing in them assumes a background.
+            const row = [];
+            const label = (text) => Text({ key: 'l' + row.length, dimColor: true, children: [text] });
+            const reading = (name, percent) => {
+                row.push(label(name));
+                row.push(Svg({
+                    key: 'g' + name,
+                    alt: gaugeAlt(name, percent),
+                    width: 96,
+                    height: 10,
+                    source: gaugeSvg(percent),
+                }));
+                row.push(Text({ key: 'p' + name, color: tone(percent), children: [percentText(percent)] }));
+            };
+
+            row.push(Text({ key: 'model', color: state.pinned ? 'yellow' : 'cyan', children: [model] }));
+            row.push(Text({
+                key: 'badge',
+                color: state.pinned ? 'yellow' : 'green',
+                children: [badgeText(state.pinned, state.routing).trim()],
+            }));
+            if (typeof state.contextPercent === 'number') reading('ctx', state.contextPercent);
+            for (const limit of state.rateLimits) {
+                const short = shortKind(limit.kind);
+                if (!short) continue;
+                reading(short, limit.percentUsed);
+                const reset = resetText(limit.resetsAt);
+                if (reset) row.push(label('↻ ' + reset));
+            }
+            strip = Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1, children: row });
+        } else {
+            const pieces = layout({ ...state, model }, e.props && e.props.bodyColumns, opts);
+            strip = Box({
+                flexDirection: 'row',
+                children: pieces.map((p, i) => Text({
+                    key: 'hud-' + i,
+                    color: p.color,
+                    dimColor: !!p.dim,
+                    children: [p.text],
+                })),
+            });
+        }
 
         // Keep whatever the mods after this one drew in the band, above the
         // strip, rather than taking the band for ourselves.

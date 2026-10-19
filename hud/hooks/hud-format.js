@@ -7,9 +7,14 @@
  * `$` could not live in this file at all.
  */
 
-/** Where green becomes amber, and amber becomes red. */
-export const WARN_AT = 60;
-export const ALARM_AT = 85;
+/**
+ * Where green becomes amber, and amber becomes red.
+ *
+ * Read each as the first percentage of its band: green runs to 55, amber
+ * covers 56 to 85, and red is 86 and up.
+ */
+export const AMBER_FROM = 56;
+export const RED_FROM = 86;
 
 /** How wide the strip is, in terminal cells. */
 export function width(pieces) {
@@ -25,35 +30,101 @@ export function width(pieces) {
  */
 export const NARROW_STEPS = [8, 6, 5, 4];
 
-/** A colour for a percentage, by those thresholds. */
+/**
+ * A colour for a percentage.
+ *
+ * The reading is rounded before it is compared, because the number printed
+ * beside the bar is rounded too. Without this, 85.6 prints as `86%` in red
+ * while the bar beside it stays amber, and a readout that disagrees with
+ * itself is worse than one that is slightly coarse.
+ */
 export function tone(percent) {
-    if (percent >= ALARM_AT) return 'red';
-    if (percent >= WARN_AT) return 'yellow';
+    const n = Math.round(Math.max(0, Math.min(100, Number(percent) || 0)));
+    if (n >= RED_FROM) return 'red';
+    if (n >= AMBER_FROM) return 'yellow';
     return 'green';
 }
 
+/** The eighth-blocks, from a sliver to seven eighths of a cell. */
+const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
 /**
- * A bar, as two runs of the same character.
+ * How much of a bar is filled, in whole cells plus a leading edge.
  *
- * Ten cells by default, which puts one block to a clean ten percent. The
- * filled count rounds rather than truncating, so anything above zero shows at
- * least part of a block: a window at 4% that drew as empty would read as
- * untouched. The reverse guard keeps 99% from drawing as full.
+ * The leading edge is what lets ten columns say more than eleven things.
+ * Rounding to whole cells, 40% through 43% all draw the same bar, and so do
+ * 77% through 81% - which is exactly where you most want to see movement.
+ * With eighths the same ten columns distinguish 81 states.
  *
- * Both runs are the **same** glyph, and only the colour differs. An earlier
- * version paired a full block with a shade character, and whether those two
- * look like one bar depends entirely on the terminal's font: the shade is
- * drawn with less ink, so in some fonts it reads as shorter or thinner and
- * the bar looks like a broken staircase rather than a track with a fill. One
- * glyph cannot disagree with itself.
+ * A reading above zero always shows something, and a reading below 100 never
+ * shows a full bar: an almost-empty window that drew as untouched, or an
+ * almost-full one that drew as done, would both be lies at the only moments
+ * that matter.
  */
-export function bar(percent, cells = 10, ascii = false) {
-    const glyph = ascii ? '#' : '█';
-    const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
-    let filled = Math.round((clamped / 100) * cells);
-    if (clamped > 0 && filled === 0) filled = 1;
-    if (clamped < 100 && filled === cells) filled = cells - 1;
-    return { filled: glyph.repeat(filled), empty: glyph.repeat(cells - filled), cells };
+export function fillOf(percent, cells) {
+    const exact = (Math.max(0, Math.min(100, Number(percent) || 0)) / 100) * cells;
+    let full = Math.floor(exact);
+    let edge = EIGHTHS[Math.round((exact - full) * 8)] || '';
+    if (edge === '█') { full += 1; edge = ''; }
+    if (percent > 0 && full === 0 && !edge) edge = '▏';
+    if (percent < 100 && full >= cells) { full = cells - 1; edge = '▉'; }
+    full = Math.max(0, Math.min(full, cells));
+    return { full, edge: full >= cells ? '' : edge };
+}
+
+/**
+ * A bar, as coloured pieces: `[`, the fill, the track, `]`.
+ *
+ * Three things are going on, and each one earned its place.
+ *
+ * **The brackets** give the bar edges, so it reads as a gauge with a known
+ * extent rather than as text that happens to be blocks. Without them you
+ * cannot see where a nearly empty bar ends.
+ *
+ * **The fill is coloured by zone, not by reading.** Each cell takes the
+ * colour of the percentage it represents, so a window at 91% draws green,
+ * then amber, then red along its length. You see not just that you are in
+ * trouble but how much of the window went by before you got there. Cells of
+ * the same colour are merged into one piece, so this costs three elements at
+ * worst.
+ *
+ * **The track is a middle dot**, which is unambiguously empty and cannot be
+ * mistaken for a short or thin block - the mistake that a light shade makes
+ * in a lot of fonts.
+ */
+export function barPieces(percent, cells = 10, ascii = false) {
+    const inner = Math.max(1, cells - 2);
+    const { full, edge } = fillOf(percent, inner);
+    const open = ascii ? '[' : '[';
+    const dot = ascii ? '.' : '·';
+    const block = ascii ? '#' : '█';
+    const pieces = [{ text: open, dim: true }];
+
+    // One piece per run of same-coloured cells, rather than one per cell.
+    let run = '';
+    let runTone = null;
+    for (let i = 0; i < full; i += 1) {
+        const at = ((i + 1) / inner) * 100;
+        const t = ascii ? tone(percent) : tone(at);
+        if (t !== runTone && run) {
+            pieces.push({ text: run, color: runTone });
+            run = '';
+        }
+        runTone = t;
+        run += block;
+    }
+    if (run) pieces.push({ text: run, color: runTone });
+    if (edge) pieces.push({ text: ascii ? block : edge, color: tone(percent) });
+
+    const used = full + (edge ? 1 : 0);
+    if (used < inner) pieces.push({ text: dot.repeat(inner - used), dim: true });
+    pieces.push({ text: ']', dim: true });
+    return pieces;
+}
+
+/** The same bar as plain text, for tests, documentation and width maths. */
+export function barText(percent, cells = 10, ascii = false) {
+    return barPieces(percent, cells, ascii).map((p) => p.text).join('');
 }
 
 /**
@@ -114,21 +185,7 @@ export function buildGroups(state, opts = {}) {
     const now = opts.now || Date.now();
     const groups = [];
 
-    /**
-     * The two runs of a bar, as pieces.
-     *
-     * The filled run takes the colour for the reading and the empty run is
-     * dimmed, which is what makes one glyph read as a track with a fill. A
-     * run of length zero is left out rather than pushed as an empty `Text`,
-     * which would be a child with nothing in it.
-     */
-    const barPieces = (percent) => {
-        const parts = bar(percent, cells, ascii);
-        const out = [];
-        if (parts.filled) out.push({ text: parts.filled, color: tone(percent) });
-        if (parts.empty) out.push({ text: parts.empty, dim: true });
-        return out;
-    };
+    const drawBar = (percent) => barPieces(percent, cells, ascii);
 
     groups.push({
         key: 'model',
@@ -145,7 +202,7 @@ export function buildGroups(state, opts = {}) {
             key: 'ctx',
             pieces: [
                 { text: 'ctx ', dim: true },
-                ...barPieces(state.contextPercent),
+                ...drawBar(state.contextPercent),
                 { text: ' ' },
                 { text: percentText(state.contextPercent), color: tone(state.contextPercent) },
             ],
@@ -162,7 +219,7 @@ export function buildGroups(state, opts = {}) {
             key: label,
             pieces: [
                 { text: label + ' ', dim: true },
-                ...barPieces(pct),
+                ...drawBar(pct),
                 { text: ' ' },
                 { text: percentText(pct), color: tone(pct) },
             ],

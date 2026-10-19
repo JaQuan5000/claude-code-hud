@@ -15,6 +15,7 @@
     "quota",
     "cost"
   ],
+  "defaultEnabled": true,
   "userConfig": {
     "routing": {
       "type": "boolean",

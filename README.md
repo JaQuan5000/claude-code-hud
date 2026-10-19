@@ -6,10 +6,16 @@
 - **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and how much of each rate-limit window is gone, with the reset time.
 
 ```
-haiku      auto │ ctx ██████████  31% │ 5h ██████████  18% ↻ 14:20 │ 7d ██████████  42% ↻ Thu
+haiku      auto │ ctx [██▌·····]  31% │ 5h [█▌······]  18% ↻ 14:20 │ 7d [███▍····]  42% ↻ Thu
 ```
 
-Each bar is one block character throughout. The filled part is coloured and the rest is dimmed, so in a terminal you read the level at a glance - and in a plain code block like the one above, where there is no colour, it looks solid. That is deliberate: pairing a full block with a shade character makes the two halves match in some terminal fonts and not others, and a bar that looks like a broken staircase is worse than one that needs colour.
+In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
+
+Three things are going on in the terminal bar, and each earned its place:
+
+- **Brackets** give it edges, so it reads as a gauge with a known extent rather than as characters that happen to be blocks. Without them you cannot see where a nearly empty bar ends.
+- **The fill is coloured by zone, not by reading.** Each cell takes the colour of the percentage it stands for, so a window at 91% runs green, then amber, then red. You see not only that you are in trouble but how much of the window went by before you got there.
+- **A partial leading edge.** Ten whole cells can only draw 11 different bars, so 40% through 43% all look identical - and so do 77% through 81%, which is exactly where you want to see movement. With eighth-blocks the same ten columns draw 81.
 
 The moment you pick a model yourself with `/model`, routing stands down and the badge reads `pin`. It will not override your choice on the next message.
 
@@ -18,11 +24,13 @@ In a narrow window it loses detail before it loses data: the bars shrink to eigh
 ## Install
 
 ```bash
-claude plugin marketplace add OWNER/claude-code-hud
+claude plugin marketplace add JaQuan5000/claude-code-hud
 claude plugin install hud@hud-mods
 ```
 
 Needs Claude Code CLI v2.1.287 or later, or Desktop v2.1.286 or later. Mods do not run in WSL sessions.
+
+Once installed it loads on **every** session on that machine, CLI and Desktop alike, with no flag and nothing to run. Install it on each machine you want it on - installs are per user, not shared across your servers. To turn it off, use `/plugin`, or `/hud off` to keep the readout and stop only the routing. It is off entirely in a session started with `--safe-mode` or `--bare`, or where `disableAllHooks` or your organization's managed settings block mods.
 
 ## How the routing decides
 
@@ -85,7 +93,7 @@ Set these in `/config`, or when the plugin is enabled.
 | `route_to_top` | `true` | Off leaves the flagship out of automatic routing |
 | `spare_quota_above` | `85` | Percent of the five-hour window at which it stops routing up |
 | `bar_cells` | `10` | Bar width. Ten gives a clean ten percent per block. |
-| `ascii` | `false` | Draw with `#`, `|` and `~` for a terminal that is not in UTF-8 |
+| `ascii` | `false` | Draw with `#`, `-`, `|` and `~` for a terminal that is not in UTF-8 |
 
 ## What it costs to run
 
