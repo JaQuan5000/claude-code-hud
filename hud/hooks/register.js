@@ -99,9 +99,16 @@ export function register(on) {
     on('session.start', async ($, e, next) => {
         await $.command.register({
             name: 'hud',
-            description: 'Show what hud is doing, or turn routing on, off, or back to auto',
-            argumentHint: '[on|off|auto]',
+            description: 'Show what hud is doing, change a tier, or turn routing on and off',
+            argumentHint: '[on|off|auto|models|set <tier> <model>]',
         });
+
+        // The only timer in the mod, and it exists for one reason: the reset
+        // times are a countdown now, and a countdown nobody redraws is wrong
+        // within a minute. Everything else here is driven by events. One
+        // redraw a minute reads the numbers already in `state`, so it costs a
+        // hook call and no requests.
+        $.clock.every(60000, () => $.ui.invalidate('ui.render'));
         try {
             const usage = await $.session.usage();
             state.contextPercent = usage && usage.context ? usage.context.percent : null;

@@ -216,13 +216,29 @@ test('percentages and model names keep a fixed width, so nothing jitters', async
     expect(modelText('a-very-long-model-name').length).toBe(10);
 });
 
-test('a reset inside the day is a clock time, and beyond it a weekday', async () => {
-    const now = Date.UTC(2026, 9, 19, 12, 0, 0);
-    const soon = Math.floor((now + 90 * 60000) / 1000);
-    const later = Math.floor((now + 50 * 3600000) / 1000);
-    expect(/^\d\d:\d\d$/.test(resetText(soon, now))).toBe(true);
-    expect(/^\d\d:\d\d$/.test(resetText(later, now))).toBe(false);
-    expect(resetText(0, now)).toBe('');
+test('a reset is a countdown, shaped by how far away it is', async () => {
+    // "1h41m" answers the question the percentage raises; "14:20" makes
+    // you do the subtraction.
+    const NOW = Date.UTC(2026, 9, 19, 12, 0, 0);
+    const at = (m: number) => resetText(Math.floor((NOW + m * 60000) / 1000), NOW);
+    expect(at(41)).toBe('41m');
+    expect(at(101)).toBe('1h41m');
+    expect(at(299)).toBe('4h59m');
+    expect(at(300)).toBe('5h');
+    expect(at(420)).toBe('7h');
+    expect(at(3 * 1440 + 11 * 60)).toBe('3d,11h');
+});
+
+test('a day or more never carries minutes, and nothing counts backwards', async () => {
+    const NOW = Date.UTC(2026, 9, 19, 12, 0, 0);
+    const at = (m: number) => resetText(Math.floor((NOW + m * 60000) / 1000), NOW);
+    for (const m of [1440, 2000, 4980, 10080]) {
+        expect(/m$/.test(at(m))).toBe(false);
+    }
+    expect(at(0)).toBe('now');
+    expect(at(-5)).toBe('now');
+    expect(resetText(0, NOW)).toBe('');
+    expect(resetText(null as unknown as number, NOW)).toBe('');
 });
 
 test('the colour changes at the thresholds and nowhere else', async () => {

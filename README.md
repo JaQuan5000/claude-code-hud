@@ -6,7 +6,7 @@
 - **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and how much of each rate-limit window is gone, with the reset time.
 
 ```
-haiku      auto │ ctx [██▌·····]  31% │ 5h [█▌······]  18% ↻ 14:20 │ 7d [███▍····]  42% ↻ Thu
+sonnet 5.5 auto │ ctx [██▌·····]  31% │ 5h [█▌······]  18% ↻ 1h41m │ 7d [███▍····]  42% ↻ 3d,11h
 ```
 
 In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
@@ -115,7 +115,7 @@ Nothing measurable, by design:
 
 - **No polling and no timers.** The numbers come from `$.session.usage()`, read when Claude Code says a limit moved (`session.measure`) and once at session start.
 - **No model call to classify.** The tier comes from a regular expression. Asking a model which model to use would spend a request to save a request.
-- **Reset times are absolute, not counted down.** A countdown would need a redraw every second for ever.
+- **One timer, for one reason.** The reset times are a countdown, which is wrong within a minute if nobody redraws it, so the strip redraws once a minute. That redraw reads numbers already in memory and makes no requests. Everything else is driven by events.
 
 ### Choosing the models
 

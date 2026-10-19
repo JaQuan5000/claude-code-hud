@@ -145,25 +145,39 @@ export function modelText(name, width = 10) {
 }
 
 /**
- * When a window resets, as something readable at a glance.
+ * How long until a window resets.
  *
- * An absolute time rather than a countdown, deliberately: a countdown would
- * have to be redrawn on a timer for ever, and the strip is meant to cost
- * nothing while you are not looking at it. Inside a day it is the clock time,
- * beyond that the weekday, which is as much as anyone needs from the
- * seven-day window.
+ * A countdown rather than a clock time, because "1h41m" answers the
+ * question the number next to it raises and "14:20" makes you do the
+ * subtraction. The cost is that it goes stale, so the strip now redraws
+ * once a minute; everything else about it is still driven by events.
+ *
+ * The shape changes with the distance, so it stays short and never says
+ * more than it needs to:
+ *
+ *   - a day or more: days and hours, no minutes, as in 3d,11h
+ *   - five hours or more: whole hours, as in 7h
+ *   - under five hours: hours and minutes, as in 1h41m
+ *   - under an hour: minutes alone, as in 41m
  */
 export function resetText(resetsAt, now = Date.now()) {
     if (!resetsAt) return '';
-    const at = new Date(Number(resetsAt) * 1000);
-    if (Number.isNaN(at.getTime())) return '';
-    const hours = (at.getTime() - now) / 3600000;
-    if (hours <= 0) return 'now';
-    if (hours > 20) return at.toLocaleDateString(undefined, { weekday: 'short' });
-    const hh = String(at.getHours()).padStart(2, '0');
-    const mm = String(at.getMinutes()).padStart(2, '0');
-    return hh + ':' + mm;
+    const at = Number(resetsAt) * 1000;
+    if (!Number.isFinite(at)) return '';
+
+    const left = Math.round((at - now) / 60000);
+    if (left <= 0) return 'now';
+
+    const days = Math.floor(left / 1440);
+    if (days >= 1) return days + 'd,' + Math.floor((left - days * 1440) / 60) + 'h';
+
+    const hours = Math.floor(left / 60);
+    const mins = left % 60;
+    if (hours >= 5) return hours + 'h';
+    if (hours === 0) return mins + 'm';
+    return mins === 0 ? hours + 'h' : hours + 'h' + mins + 'm';
 }
+
 
 /** The word after the model name: who chose it. */
 export function badgeText(pinned, routing) {
