@@ -16,6 +16,7 @@
 
 import { layout, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
 import { gaugeSvg, gaugeAlt } from './hud-svg.js';
+import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
 
 /**
@@ -40,18 +41,58 @@ const state = {
     rateLimits: [],
 };
 
-export function register(on, options = {}) {
-    const opts = {
-        fastModel: options.fast_model || 'haiku',
-        baseModel: options.base_model || 'sonnet',
-        deepModel: options.deep_model || 'opus',
-        topModel: options.top_model || 'fable',
-        routeToTop: options.route_to_top !== false,
-        spareAbove: typeof options.spare_quota_above === 'number' ? options.spare_quota_above : 85,
-        barCells: typeof options.bar_cells === 'number' ? options.bar_cells : 10,
-        ascii: !!options.ascii,
-    };
-    state.routing = options.routing !== false;
+/**
+ * Everything the mod can be told, in one place.
+ *
+ * These were nine `userConfig` fields, which Claude Code prompts for when a
+ * plugin is enabled: installing the mod ended in a notice that nine settings
+ * were not filled in and a suggestion to run `/plugin configure`. The mod
+ * worked regardless - the defaults were passed in - but a readout you have
+ * to configure before it will read anything is a bad trade for options most
+ * people will never change. They are constants now, the install is silent,
+ * and the only ones worth changing mid-session have `/hud` commands.
+ *
+ * Edit here to retune.
+ *
+ * **These must be full model ids, not the aliases.** `haiku`, `sonnet`,
+ * `opus` and `fable` are resolved by the command line, for `--model` and
+ * `/model`. A `turn.step` hook sets the model on the request itself, which
+ * is a layer below that, so an alias arrives as a literal name and the
+ * engine answers `There's an issue with the selected model (sonnet). It may
+ * not exist` and falls back to something else. The strip shortens these for
+ * display, so the readout still says `sonnet 5.5`.
+ */
+const DEFAULTS = {
+    /** Typos, renames, formatting, comments. */
+    fastModel: 'claude-haiku-5-5',
+    /** Everyday work, and anything the reading is uncertain about. */
+    baseModel: 'claude-sonnet-5-5',
+    /** Planning, refactors, debugging, root causes. */
+    deepModel: 'claude-opus-5-5',
+    /** Whole-system briefs, and whenever you ask for the best model. */
+    topModel: 'claude-fable-5-1',
+    /** Whether the flagship tier is reachable without asking for it by name. */
+    routeToTop: true,
+    /**
+     * The percentage of the five-hour window past which routing stops
+     * reaching for a more expensive model on its own.
+     *
+     * 100 means never hold back: the tier a prompt earns is the tier it
+     * gets, even at 99% of the window. Lower it to keep a reserve for work
+     * you pick by hand.
+     */
+    spareAbove: 100,
+    /** Bar width in columns, brackets included. */
+    barCells: 10,
+    /** Draw with plain ASCII, for a terminal that is not in UTF-8. */
+    ascii: false,
+};
+
+const TIER_KEYS = { fast: 'fastModel', base: 'baseModel', deep: 'deepModel', top: 'topModel' };
+const NEWEST_OPUS = 'claude-opus-5-5';
+
+export function register(on) {
+    const opts = { ...DEFAULTS };
 
     // Everything this mod does at session start, in one hook: registering two
     // hooks on the same event without matchers is a load error.
@@ -132,27 +173,69 @@ export function register(on, options = {}) {
     });
 
     on('command.run', { command: 'hud' }, async ($, e) => {
-        const arg = String((e && e.args) || '').trim().toLowerCase();
-        if (arg === 'off') {
+        const words = String((e && e.args) || '').trim().split(/\s+/).filter(Boolean);
+        const verb = (words[0] || '').toLowerCase();
+
+        if (verb === 'off') {
             state.routing = false;
             state.chosen = null;
             $.ui.invalidate('ui.render');
             return { text: 'Routing off. The readout stays, and the model is whatever you set.' };
         }
-        if (arg === 'on' || arg === 'auto') {
+
+        if (verb === 'on' || verb === 'auto') {
             state.routing = true;
             state.pinned = false;
             $.ui.invalidate('ui.render');
             return {
-                text: 'Routing on. Small work goes to ' + opts.fastModel
-                    + ', planning to ' + opts.deepModel
-                    + (opts.routeToTop ? ', whole-system work to ' + opts.topModel : '')
+                text: 'Routing on. Small work goes to ' + shortModel(opts.fastModel)
+                    + ', planning to ' + shortModel(opts.deepModel)
+                    + (opts.routeToTop ? ', whole-system work to ' + shortModel(opts.topModel) : '')
                     + '.',
             };
         }
+
+        if (verb === 'models') {
+            const rows = MODELS.map((m) => '  ' + m.short.padEnd(11) + m.id.padEnd(20) + m.note);
+            return {
+                text: ['Models a tier can be set to:', ...rows,
+                    '', 'Set one with /hud set <tier> <model>, as in /hud set deep opus 4.8.',
+                    'A bare family name means its newest: opus is ' + shortModel(NEWEST_OPUS) + '.'].join('\n'),
+            };
+        }
+
+        if (verb === 'set') {
+            const tier = (words[1] || '').toLowerCase();
+            const key = TIER_KEYS[tier];
+            if (!key) {
+                return { text: 'Which tier? One of: fast, base, deep, top. As in /hud set deep opus.' };
+            }
+            const wanted = resolveModel(words.slice(2).join(' '));
+            if (!wanted) {
+                return {
+                    text: 'No model by that name. Run /hud models to see the list, or give a full id such as claude-opus-5-5.',
+                };
+            }
+            opts[key] = wanted;
+            // The tier of the turn already decided is stale now.
+            state.chosen = null;
+            $.ui.invalidate('ui.render');
+            return {
+                text: tier + ' work now goes to ' + shortModel(wanted) + ' (' + wanted + ')'
+                    + ' for this session. Edit DEFAULTS in register.js to make it permanent.',
+            };
+        }
+
         const lines = [
             'routing: ' + (state.routing ? 'on' : 'off') + (state.pinned ? ', standing down because you picked a model' : ''),
-            'next request: ' + (state.chosen || 'whatever the session is on') + (state.reason ? ' (' + state.reason + ')' : ''),
+            'next request: ' + (state.chosen ? shortModel(state.chosen) : 'whatever the session is on')
+                + (state.reason ? ' (' + state.reason + ')' : ''),
+            '',
+            '  fast  ' + shortModel(opts.fastModel),
+            '  base  ' + shortModel(opts.baseModel),
+            '  deep  ' + shortModel(opts.deepModel),
+            '  top   ' + (opts.routeToTop ? shortModel(opts.topModel) : 'off'),
+            '',
             'context: ' + (state.contextPercent == null ? 'unknown' : Math.round(state.contextPercent) + '% used'),
         ];
         for (const limit of state.rateLimits) {
@@ -161,7 +244,9 @@ export function register(on, options = {}) {
         if (!state.rateLimits.length) {
             lines.push('quota: not reported for this account');
         }
-        lines.push('/hud off to stop routing, /hud auto to hand the choice back to hud');
+        lines.push('');
+        lines.push('/hud off stops routing, /hud auto hands the choice back, /hud models lists models,');
+        lines.push('/hud set <tier> <model> changes one for this session.');
         return { text: lines.join('\n') };
     });
 
@@ -182,6 +267,9 @@ export function register(on, options = {}) {
                 model = '?';
             }
         }
+        // The column is ten wide and the ids are not: 'claude-sonnet-5-5'
+        // would draw as 'claude-son'.
+        model = shortModel(model);
 
         let strip;
         if (e.surface === 'desktop' && typeof Svg === 'function') {

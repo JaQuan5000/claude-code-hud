@@ -11,6 +11,7 @@
 import { expect, test } from 'claude-code/testing';
 
 import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
+import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js';
 import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
@@ -332,4 +333,51 @@ test('/hud says whether it is routing, and stops when told to', async ($) => {
 
     const back = await $.command.run({ command: 'hud', args: 'auto' });
     expect(back.text.indexOf('Routing on') >= 0).toBe(true);
+});
+
+test('every model in the catalogue is a full id, never an alias', async () => {
+    // An alias on the request is the bug this file exists to prevent: the
+    // engine answers "the selected model (sonnet) may not exist".
+    for (const m of MODELS) {
+        expect(/^claude-[a-z]+-\d+(-\d+)?$/.test(m.id)).toBe(true);
+        expect(['haiku', 'sonnet', 'opus', 'fable', 'best'].includes(m.id)).toBe(false);
+    }
+});
+
+test('a family name resolves to that family newest', async () => {
+    expect(resolveModel('sonnet')).toBe('claude-sonnet-5-5');
+    expect(resolveModel('opus')).toBe('claude-opus-5-5');
+    expect(resolveModel('haiku')).toBe('claude-haiku-5-5');
+    expect(resolveModel('fable')).toBe('claude-fable-5-1');
+    expect(resolveModel('best')).toBe(NEWEST.fable);
+});
+
+test('an older model can be picked by name', async () => {
+    expect(resolveModel('opus 4.8')).toBe('claude-opus-4-8');
+    expect(resolveModel('opus-4-8')).toBe('claude-opus-4-8');
+    expect(resolveModel('sonnet 5')).toBe('claude-sonnet-5');
+    expect(resolveModel('haiku 4.5')).toBe('claude-haiku-4-5');
+});
+
+test('a full id passes through, in any case', async () => {
+    expect(resolveModel('claude-opus-5-5')).toBe('claude-opus-5-5');
+    expect(resolveModel('Claude-Fable-5-1')).toBe('claude-fable-5-1');
+});
+
+test('nonsense resolves to null rather than to a guess', async () => {
+    // Guessing would set a tier to a model that fails on the next request,
+    // far from where the mistake was made.
+    for (const bad of ['', '   ', 'sonnet5', 'gpt-4', 'nonsense', 'claude-nope-9-9']) {
+        expect(resolveModel(bad)).toBe(null, JSON.stringify(bad));
+    }
+});
+
+test('every short name fits the ten-column model field', async () => {
+    for (const m of MODELS) expect(m.short.length <= 10, m.short).toBe(true);
+});
+
+test('an id the catalogue has never heard of still prints sensibly', async () => {
+    expect(shortModel('claude-newthing-6-2')).toBe('newthing 6.2');
+    expect(shortModel('something-else')).toBe('something-else');
+    expect(shortModel('')).toBe('');
 });

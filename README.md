@@ -28,6 +28,15 @@ claude plugin marketplace add JaQuan5000/claude-code-hud
 claude plugin install hud@hud-mods
 ```
 
+To remove it:
+
+```bash
+claude plugin uninstall hud@hud-mods
+claude plugin marketplace remove hud-mods
+```
+
+To turn it off without uninstalling, run `/plugin` and disable it there, or `/hud off` to keep the readout and stop only the routing.
+
 Needs Claude Code CLI v2.1.287 or later, or Desktop v2.1.286 or later. Mods do not run in WSL sessions.
 
 Once installed it loads on **every** session on that machine, CLI and Desktop alike, with no flag and nothing to run. Install it on each machine you want it on - installs are per user, not shared across your servers. To turn it off, use `/plugin`, or `/hud off` to keep the readout and stop only the routing. It is off entirely in a session started with `--safe-mode` or `--bare`, or where `disableAllHooks` or your organization's managed settings block mods.
@@ -67,9 +76,9 @@ So `no shortcuts on this, plan the migration` goes to Fable, where `plan the mig
 
 ### Sparing the window you are about to hit
 
-When the five-hour window is more than 85% used, routing stops reaching upward on its own. Saving quota is the point of the mod, so spending the last of it automatically would defeat it.
+Out of the box it never holds back: the tier a prompt earns is the tier it gets, even at 99% of the window. Set `spareAbove` below 100 to keep a reserve for work you pick by hand.
 
-It steps down one rung rather than all the way: `top` becomes `deep`, and `deep` becomes `base`. Whole-system work is still whole-system work when the quota is thin. You can always choose any model by hand, and `spare_quota_above: 100` never holds back.
+It steps down one rung at a time rather than all the way: `top` becomes `deep`, and `deep` becomes `base`. Whole-system work is still whole-system work when the quota is thin.
 
 ## Commands
 
@@ -78,22 +87,27 @@ It steps down one rung rather than all the way: `top` becomes `deep`, and `deep`
 | `/hud` | Says what it is routing, why, and what the numbers are |
 | `/hud off` | Stops routing. The readout stays. |
 | `/hud auto` | Starts routing again, and clears a pin |
+| `/hud models` | Lists every model a tier can be set to |
+| `/hud set <tier> <model>` | Points one tier at a different model for this session |
 
 ## Settings
 
-Set these in `/config`, or when the plugin is enabled.
+There is nothing to configure. Install it and it runs.
 
-| Setting | Default | What it is |
+These were `userConfig` options once, which meant every install ended with a notice that nine settings were unfilled and a suggestion to run `/plugin configure`. A readout you have to set up before it will read anything is a bad trade for options most people never touch, so they are constants in [`hud/hooks/register.js`](hud/hooks/register.js) now. Edit `DEFAULTS` there to retune.
+
+| Name | Default | What it is |
 | :- | :- | :- |
-| `routing` | `true` | Turn off to keep only the readout |
-| `fast_model` | `haiku` | Model for small work |
-| `base_model` | `sonnet` | Model for everyday work |
-| `deep_model` | `opus` | Model for planning and hard problems |
-| `top_model` | `fable` | The flagship, for whole-system briefs. Empty to never route here. |
-| `route_to_top` | `true` | Off leaves the flagship out of automatic routing |
-| `spare_quota_above` | `85` | Percent of the five-hour window at which it stops routing up |
-| `bar_cells` | `10` | Bar width. Ten gives a clean ten percent per block. |
-| `ascii` | `false` | Draw with `#`, `-`, `|` and `~` for a terminal that is not in UTF-8 |
+| `fastModel` | `claude-haiku-5-5` | Model for small work |
+| `baseModel` | `claude-sonnet-5-5` | Model for everyday work |
+| `deepModel` | `claude-opus-5-5` | Model for planning and hard problems |
+| `topModel` | `claude-fable-5-1` | The flagship, for whole-system briefs |
+| `routeToTop` | `true` | Off leaves the flagship out of automatic routing |
+| `spareAbove` | `100` | Percent of the five-hour window at which it stops routing up. 100 never holds back. |
+| `barCells` | `10` | Bar width in columns, brackets included |
+| `ascii` | `false` | Draw with `#`, `-`, `\|` and `~` for a terminal that is not in UTF-8 |
+
+Every model must be a full id, for the reason given under [Choosing the models](#choosing-the-models). Routing itself is on at start and toggles at runtime with `/hud off` and `/hud auto`.
 
 ## What it costs to run
 
@@ -105,11 +119,26 @@ Nothing measurable, by design:
 
 ### Choosing the models
 
-Each model setting takes anything `/model` takes: an alias (`haiku`, `sonnet`, `opus`, `fable`, `best`) or a full id (`claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`).
+Each tier takes a **full model id**, such as `claude-sonnet-5-5`. The short aliases (`sonnet`, `opus`, `haiku`, `fable`) are resolved by the command line for `--model` and `/model`; they are **not** resolved on the request itself, which is what a mod sets. Passing one through gets you `There is an issue with the selected model (sonnet). It may not exist` and a silent fallback to something else.
 
-`fable` resolves to Claude Fable 5.1, the flagship, at $10 / $50 per million tokens against Opus 5.5 at $4 / $20 - and on subscription plans Fable can bill to usage credits rather than your included allowance. That is why the `top` tier is harder to reach than the others: planning alone will not get you there, or every design question would go to the most expensive model available. It takes planning-shaped work **and** real size, or you asking for it in words.
+`/hud models` lists everything a tier can be set to:
 
-Two ways to keep it out of the way entirely: `route_to_top: false`, or an empty `top_model`. Either makes `top` behave exactly as `deep`, and you can still choose the flagship yourself with `/model fable` whenever you want it.
+| Name | Id |
+| :- | :- |
+| fable 5.1 | `claude-fable-5-1` |
+| fable 5 | `claude-fable-5` |
+| opus 5.5 | `claude-opus-5-5` |
+| opus 5 | `claude-opus-5` |
+| opus 4.8, 4.7, 4.6 | `claude-opus-4-8` and so on |
+| sonnet 5.5 | `claude-sonnet-5-5` |
+| sonnet 5 | `claude-sonnet-5` |
+| sonnet 4.6 | `claude-sonnet-4-6` |
+| haiku 5.5 | `claude-haiku-5-5` |
+| haiku 4.5 | `claude-haiku-4-5` |
+
+`/hud set <tier> <model>` changes one for the session, and it is forgiving about the name: `/hud set deep opus` takes the newest Opus, `/hud set deep opus 4.8` takes that one, and a full id always works. A name it does not recognise is refused rather than guessed at, because a bad model fails on the next request rather than where you typed it.
+
+The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and on subscription plans it can bill to usage credits. That is why the `top` tier takes two signals to reach, not one.
 
 ## What it can reach
 
