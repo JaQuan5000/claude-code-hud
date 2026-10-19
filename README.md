@@ -162,6 +162,7 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 | `/hud log` | What was routed where, and which words decided it |
 | `/hud tune` | What the log says about your patterns |
 | `/hud suggest on` / `off` | Follow-up suggestions under the strip |
+| `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
 
 ## Settings

@@ -15,6 +15,7 @@ import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js
 import { paceOf, paceText, paceMark, FAST_RATIO } from '../hooks/hud-pace.js';
 import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
 import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hooks/hud-suggest.js';
+import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage } from '../hooks/hud-usage.js';
 import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, shortKind, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
@@ -631,4 +632,113 @@ test('the log lines up in columns', async () => {
     const lines = logLines(entries);
     const at = lines.map((l) => l.indexOf('['));
     expect(at[0]).toBe(at[1]);
+});
+
+test('a percentage is read whatever it is called', async () => {
+    // The live failure this exists to stop: insisting on one spelling made
+    // the context reading vanish from a strip whose other numbers were fine.
+    for (const key of ['percent', 'percentUsed', 'percent_used', 'usedPercentage', 'used_percentage']) {
+        expect(Math.round(contextPercentOf({ context: { [key]: 31 } }))).toBe(31);
+    }
+});
+
+test('a fraction is scaled, because 0.31 and 31 are the same reading', async () => {
+    expect(Math.round(contextPercentOf({ context: { percent: 0.31 } }))).toBe(31);
+    expect(Math.round(contextPercentOf({ context: { percent: 31 } }))).toBe(31);
+});
+
+test('exactly 1 is read as one percent, the safer of the two mistakes', async () => {
+    // Reading it as 100% would paint the bar red and claim you were out.
+    expect(asPercent(1)).toBe(1);
+});
+
+test('a missing percentage is rebuilt from tokens and window', async () => {
+    expect(Math.round(contextPercentOf({ context: { tokens: 50000, window: 200000 } }))).toBe(25);
+});
+
+test('and from the remaining percentage when that is all there is', async () => {
+    expect(Math.round(contextPercentOf({ context: { remainingPercentage: 70 } }))).toBe(30);
+});
+
+test('no context at all is null, not zero', async () => {
+    // Zero would draw an empty bar and claim the context was untouched.
+    expect(contextPercentOf({})).toBe(null);
+    expect(contextPercentOf({ context: null })).toBe(null);
+    expect(contextPercentOf({ context: {} })).toBe(null);
+    expect(contextPercentOf(null)).toBe(null);
+});
+
+test('limits are read under any of their names', async () => {
+    for (const key of ['rateLimits', 'rate_limits', 'limits']) {
+        const out = limitsOf({ [key]: [{ kind: 'five_hour', percentUsed: 18, resetsAt: 1792400000 }] });
+        expect(out.length).toBe(1);
+        expect(out[0].percentUsed).toBe(18);
+    }
+});
+
+test('a reset time is read as seconds, from seconds, milliseconds or a date', async () => {
+    const seconds = 1792400000;
+    expect(epochSecondsOf({ resetsAt: seconds })).toBe(seconds);
+    expect(epochSecondsOf({ resetsAt: seconds * 1000 })).toBe(seconds);
+    expect(epochSecondsOf({ reset_at: seconds })).toBe(seconds);
+    expect(epochSecondsOf({ resetAt: seconds })).toBe(seconds);
+    expect(epochSecondsOf({ resetsAt: new Date(seconds * 1000).toISOString() })).toBe(seconds);
+});
+
+test('a window with no reset time still shows its percentage', async () => {
+    // Losing a whole reading because one field is missing is the bug.
+    const out = limitsOf({ rateLimits: [{ kind: 'seven_day', percentUsed: 56 }] });
+    expect(out.length).toBe(1);
+    expect(out[0].percentUsed).toBe(56);
+    expect(out[0].resetsAt).toBe(null);
+});
+
+test('a window with no percentage is dropped, since it has nothing to say', async () => {
+    expect(limitsOf({ rateLimits: [{ kind: 'five_hour' }] }).length).toBe(0);
+});
+
+test('junk never throws on a welcome screen', async () => {
+    const junk = [null, undefined, 42, 'nope', {}, { rateLimits: 'nope' }, { rateLimits: [null, 7] }];
+    for (const bad of junk) {
+        const out = readUsage(bad);
+        expect(out.contextPercent).toBe(null);
+        expect(Array.isArray(out.rateLimits)).toBe(true);
+    }
+});
+
+test('the documented shape reads correctly end to end', async () => {
+    const usage = {
+        startedAt: 1792300000,
+        context: { tokens: 62000, window: 200000, percent: 31 },
+        rateLimits: [
+            { kind: 'five_hour', percentUsed: 4, resetsAt: 1792400000 },
+            { kind: 'seven_day', percentUsed: 56, resetsAt: 1792700000 },
+        ],
+        cost: { total_cost_usd: 0.42 },
+    };
+    const out = readUsage(usage);
+    expect(Math.round(out.contextPercent)).toBe(31);
+    expect(out.rateLimits.length).toBe(2);
+    expect(out.rateLimits[1].kind).toBe('seven_day');
+    expect(out.rateLimits[1].resetsAt).toBe(1792700000);
+});
+
+test('the same reading under every other spelling gives the same answer', async () => {
+    const usage = {
+        context: { used_tokens: 62000, context_window_size: 200000 },
+        rate_limits: [{ type: 'five_hour', used_percentage: 4, reset_at: 1792400000 }],
+    };
+    const out = readUsage(usage);
+    expect(Math.round(out.contextPercent)).toBe(31);
+    expect(out.rateLimits[0].kind).toBe('five_hour');
+    expect(out.rateLimits[0].resetsAt).toBe(1792400000);
+});
+
+test('/hud raw says what it found, and what it made of it', async () => {
+    const lines = describeUsage({ context: { percent: 31 }, rateLimits: [{ kind: 'five_hour', percentUsed: 4 }] });
+    const text = lines.join('\n');
+    expect(/context: percent/.test(text)).toBe(true);
+    expect(/read as: context 31%/.test(text)).toBe(true);
+    expect(/no reset time/.test(text)).toBe(true);
+    expect(/nothing usable/.test(describeUsage(null).join('\n'))).toBe(true);
 });

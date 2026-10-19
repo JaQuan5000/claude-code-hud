@@ -1,7 +1,7 @@
 {
   "name": "hud",
   "displayName": "HUD",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Claude Code mod: routes each request to the cheapest capable model and shows model, context and quota in your status line.",
   "author": {
     "name": "hud authors"

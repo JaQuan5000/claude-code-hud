@@ -20,6 +20,7 @@ import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
 import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
 import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
+import { readUsage, describeUsage } from './hud-usage.js';
 
 /**
  * What the strip draws from.
@@ -46,6 +47,8 @@ const state = {
     /** Follow-ups offered under the strip, and whether to ask for them. */
     suggestions: [],
     suggestOn: true,
+    /** The last usage() reply, for `/hud raw`. */
+    lastUsage: null,
 };
 
 /**
@@ -130,8 +133,13 @@ export function register(on) {
         $.clock.every(60000, () => $.ui.invalidate('ui.render'));
         try {
             const usage = await $.session.usage();
-            state.contextPercent = usage && usage.context ? usage.context.percent : null;
-            state.rateLimits = (usage && usage.rateLimits) || [];
+            // Read defensively: insisting on one spelling of these fields is
+            // how the context reading and every reset time went missing from
+            // a working strip.
+            const read = readUsage(usage);
+            state.contextPercent = read.contextPercent;
+            state.rateLimits = read.rateLimits;
+            state.lastUsage = usage;
         } catch {
             // No usage yet. The first turn's session.measure fills it in.
         }
@@ -144,8 +152,13 @@ export function register(on) {
     on('session.measure', async ($, e, next) => {
         try {
             const usage = await $.session.usage();
-            state.contextPercent = usage && usage.context ? usage.context.percent : null;
-            state.rateLimits = (usage && usage.rateLimits) || [];
+            // Read defensively: insisting on one spelling of these fields is
+            // how the context reading and every reset time went missing from
+            // a working strip.
+            const read = readUsage(usage);
+            state.contextPercent = read.contextPercent;
+            state.rateLimits = read.rateLimits;
+            state.lastUsage = usage;
             $.ui.invalidate('ui.render');
         } catch {
             // Leave the last known numbers up rather than blanking the strip.
@@ -290,6 +303,12 @@ export function register(on) {
             };
         }
 
+        if (verb === 'raw') {
+            // What usage() actually returned, for when a field is renamed
+            // again and a reading quietly stops appearing.
+            return { text: describeUsage(state.lastUsage).join("\n") };
+        }
+
         if (verb === 'log') {
             return { text: ["What the router decided, newest last:", ...logLines(state.log)].join("\n") };
         }
@@ -370,6 +389,7 @@ export function register(on) {
         lines.push('  /hud log                 what was routed where, and why');
         lines.push('  /hud tune                what the log says about the patterns');
         lines.push('  /hud suggest on | off    follow-ups under the strip');
+        lines.push('  /hud raw                 what usage() reported, if a reading is missing');
         return { text: lines.join('\n') };
     });
 
