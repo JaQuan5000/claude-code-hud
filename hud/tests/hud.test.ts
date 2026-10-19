@@ -275,7 +275,7 @@ const FULL = {
 test('the whole strip fits a wide window', async () => {
     const pieces = fit(buildGroups(FULL, OPTS), 200);
     expect(width(pieces) <= 200).toBe(true);
-    expect(pieces.some((p) => p.text.indexOf('session') === 0)).toBe(true);
+    expect(pieces.some((p) => p.text.indexOf('Session') === 0)).toBe(true);
 });
 
 test('a narrow window sheds the reset times before a whole reading', async () => {
@@ -283,14 +283,14 @@ test('a narrow window sheds the reset times before a whole reading', async () =>
     const full = width(fit(groups, 200));
     const pieces = fit(groups, full - 4);
     expect(pieces.some((p) => p.text.indexOf('\u21bb') >= 0)).toBe(false);
-    expect(pieces.some((p) => p.text.indexOf('week') === 0)).toBe(true);
+    expect(pieces.some((p) => p.text.indexOf('Week') === 0)).toBe(true);
 });
 
 test('a very narrow window keeps the model and drops the rest', async () => {
     const pieces = fit(buildGroups(FULL, OPTS), 16);
     expect(pieces.length > 0).toBe(true);
     expect(pieces[0].text.indexOf('haiku')).toBe(0);
-    expect(pieces.some((p) => p.text.indexOf('week') === 0)).toBe(false);
+    expect(pieces.some((p) => p.text.indexOf('Week') === 0)).toBe(false);
 });
 
 test('a window with no readings at all still names the model', async () => {
@@ -311,15 +311,15 @@ test('a window this list has never seen is shown, not hidden', async () => {
     // being unrecognised is how you run out of something nobody showed you.
     const fable = { ...FULL, rateLimits: [{ kind: 'seven_day_fable', percentUsed: 40, resetsAt: 0 }] };
     const pieces = fit(buildGroups(fable, OPTS), 200);
-    expect(pieces.some((p) => p.text.indexOf('fable') === 0)).toBe(true);
+    expect(pieces.some((p) => p.text.indexOf('Fable') === 0)).toBe(true);
 });
 
 test('the window names match what the usage panel calls them', async () => {
     // "7d" beside a reset time reads as seven days to reset. It is the
     // name of the window, and the name is what was wrong.
-    expect(shortKind('five_hour')).toBe('session');
-    expect(shortKind('seven_day')).toBe('week');
-    expect(shortKind('seven_day_fable')).toBe('fable');
+    expect(shortKind('five_hour')).toBe('Session');
+    expect(shortKind('seven_day')).toBe('Week');
+    expect(shortKind('seven_day_fable')).toBe('Fable');
     expect(shortKind('spend_limit')).toBe('');
     expect(shortKind('')).toBe('');
 });
@@ -340,8 +340,8 @@ test('a narrow window narrows the bars rather than losing a reading', async () =
     // were sitting in the bars.
     const pieces = layout(FULL, 70, OPTS);
     expect(width(pieces) <= 70).toBe(true);
-    expect(pieces.some((p) => p.text.indexOf('session') === 0)).toBe(true);
-    expect(pieces.some((p) => p.text.indexOf('week') === 0)).toBe(true);
+    expect(pieces.some((p) => p.text.indexOf('Session') === 0)).toBe(true);
+    expect(pieces.some((p) => p.text.indexOf('Week') === 0)).toBe(true);
 });
 
 test('the strip never overflows, at any width', async () => {
@@ -354,7 +354,7 @@ test('the strip never overflows, at any width', async () => {
 test('an unmeasured window draws at full width rather than collapsing', async () => {
     for (const columns of [undefined, 0, null]) {
         const pieces = layout(FULL, columns as number, OPTS);
-        expect(pieces.some((p) => p.text.indexOf('week') === 0)).toBe(true);
+        expect(pieces.some((p) => p.text.indexOf('Week') === 0)).toBe(true);
     }
 });
 

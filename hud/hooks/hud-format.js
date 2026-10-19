@@ -215,7 +215,7 @@ export function buildGroups(state, opts = {}) {
         groups.push({
             key: 'ctx',
             pieces: [
-                { text: 'ctx ', dim: true },
+                { text: 'Ctx ', dim: true },
                 ...drawBar(state.contextPercent),
                 { text: ' ' },
                 { text: percentText(state.contextPercent), color: tone(state.contextPercent) },
@@ -250,7 +250,8 @@ export function buildGroups(state, opts = {}) {
  * These were `5h` and `7d`, which was a mistake: beside a countdown, a
  * label that is itself a duration reads as one. `7d [####..] 54%` looked
  * like seven days until a reset rather than the weekly window at 54%.
- * These names match what the usage panel calls them, so the two agree.
+ * These names match what the usage panel calls them, so the two agree,
+ * and they are capitalised so the labels read as names rather than units.
  *
  * An unknown kind is not dropped. Fable bills against its own weekly
  * allowance, so a limit this list has not seen is more likely to be one
@@ -263,8 +264,8 @@ export function shortKind(kind) {
     const k = String(kind || '').toLowerCase();
     if (!k) return '';
     if (k.indexOf('spend') >= 0) return '';
-    if (k === 'five_hour' || k === 'fivehour') return 'session';
-    if (k === 'seven_day' || k === 'sevenday') return 'week';
+    if (k === 'five_hour' || k === 'fivehour') return 'Session';
+    if (k === 'seven_day' || k === 'sevenday') return 'Week';
 
     // Anything else: strip the plumbing words and keep it short enough
     // for the strip. `seven_day_fable` becomes `fable`, which is exactly
@@ -272,7 +273,9 @@ export function shortKind(kind) {
     const words = k.replace(/limit|quota|rate/g, ' ').split(/[^a-z0-9]+/).filter(Boolean);
     const named = words.filter((w) => !['five', 'seven', 'hour', 'hours', 'day', 'days', 'week', 'weekly'].includes(w));
     const pick = (named.length ? named : words).join(' ');
-    return pick ? pick.slice(0, 7) : '';
+    if (!pick) return '';
+    const cut = pick.slice(0, 7);
+    return cut.charAt(0).toUpperCase() + cut.slice(1);
 }
 
 
