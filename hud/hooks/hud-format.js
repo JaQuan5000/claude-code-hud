@@ -245,17 +245,36 @@ export function buildGroups(state, opts = {}) {
 }
 
 /**
- * The names the readout uses for the windows the API reports.
+ * The name the readout gives each window the API reports.
  *
- * An unknown kind is left out rather than printed raw: a new window appearing
- * one day should not put `spend_limit_v2` on the line.
+ * These were `5h` and `7d`, which was a mistake: beside a countdown, a
+ * label that is itself a duration reads as one. `7d [####..] 54%` looked
+ * like seven days until a reset rather than the weekly window at 54%.
+ * These names match what the usage panel calls them, so the two agree.
+ *
+ * An unknown kind is not dropped. Fable bills against its own weekly
+ * allowance, so a limit this list has not seen is more likely to be one
+ * that matters than noise - a hidden limit is how you run out of
+ * something you were never shown. It is tidied into a short label
+ * instead, and a spend limit is still left out, since a dollar cap is not
+ * a quota this readout can say anything useful about.
  */
 export function shortKind(kind) {
-    const k = String(kind || '');
-    if (k === 'five_hour' || k === 'fiveHour') return '5h';
-    if (k === 'seven_day' || k === 'sevenDay') return '7d';
-    return '';
+    const k = String(kind || '').toLowerCase();
+    if (!k) return '';
+    if (k.indexOf('spend') >= 0) return '';
+    if (k === 'five_hour' || k === 'fivehour') return 'session';
+    if (k === 'seven_day' || k === 'sevenday') return 'week';
+
+    // Anything else: strip the plumbing words and keep it short enough
+    // for the strip. `seven_day_fable` becomes `fable`, which is exactly
+    // the separate weekly allowance the usage panel shows for it.
+    const words = k.replace(/limit|quota|rate/g, ' ').split(/[^a-z0-9]+/).filter(Boolean);
+    const named = words.filter((w) => !['five', 'seven', 'hour', 'hours', 'day', 'days', 'week', 'weekly'].includes(w));
+    const pick = (named.length ? named : words).join(' ');
+    return pick ? pick.slice(0, 7) : '';
 }
+
 
 /**
  * Fit the groups to the window, shedding rather than wrapping.

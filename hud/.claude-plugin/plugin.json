@@ -1,7 +1,7 @@
 {
   "name": "hud",
   "displayName": "HUD",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Routes each request to the cheapest capable Claude model, and shows model, context and quota above the prompt",
   "author": {
     "name": "hud authors"

@@ -3,13 +3,15 @@
 `hud` is a Claude Code mod that does two things:
 
 - **Routes each request to the cheapest capable model.** A typo fix goes to Haiku. Everyday work goes to Sonnet. A planning job goes to Opus. A whole-system brief goes to Fable. You stop spending frontier quota on one-line edits, and you stop under-powering the work that deserves the best model.
-- **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and how much of each rate-limit window is gone, with the reset time.
+- **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and each rate-limit window with how long until it resets.
 
 ```
-sonnet 5.5 auto │ ctx [██▌·····]  31% │ 5h [█▌······]  18% ↻ 1h41m │ 7d [███▍····]  42% ↻ 3d,11h
+sonnet 5.5 auto │ ctx [██▌·····]  31% │ session [█▌······]  18% ↻ 1h41m │ week [████▍···]  55% ↻ 3d,11h
 ```
 
 In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
+
+The windows are named the way your usage panel names them: `session` for the five-hour window, `week` for the seven-day one, and `fable` for the separate weekly allowance Fable bills against. They were `5h` and `7d`, which was a mistake - beside a reset time, a label that is itself a duration reads as one, so `7d ... 55%` looked like seven days to reset rather than the weekly window at 55%. A window this list has never seen is shown under a tidied name rather than hidden, because a limit nobody tells you about is one you run out of; a spend limit is still left out, since a dollar cap is not a quota the readout can say anything useful about.
 
 Three things are going on in the terminal bar, and each earned its place:
 

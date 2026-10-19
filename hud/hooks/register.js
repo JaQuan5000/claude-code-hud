@@ -314,7 +314,15 @@ export function register(on) {
             }
             strip = Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1, children: row });
         } else {
-            const pieces = layout({ ...state, model }, e.props && e.props.bodyColumns, opts);
+            // How much room there is, in order of how much it can be
+            // trusted. The band reports its own width; before the app has
+            // measured its window it may report nothing at all, and a strip
+            // drawn at full width is then clipped by whatever is narrower -
+            // which is how the reset times disappeared off the right.
+            const columns = (e.props && e.props.bodyColumns)
+                || (e.viewport && e.viewport.columns)
+                || 80;
+            const pieces = layout({ ...state, model }, columns, opts);
             strip = Box({
                 flexDirection: 'row',
                 children: pieces.map((p, i) => Text({
