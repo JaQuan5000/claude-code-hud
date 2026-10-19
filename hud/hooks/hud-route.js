@@ -30,8 +30,15 @@ const DEEP = /\b(plan|planning|design|architect|architecture)\b|\b(refactor|rest
  */
 const TOP_EXPLICIT = /\b(best model|flagship|frontier model|use fable|think (really|very) hard|no shortcuts)\b/i;
 
-/** Work whose scope is a whole thing rather than a part of one. */
-const TOP_SCOPE = /\b(entire|whole|complete) (code ?base|repo(sitory)?|project|system|app(lication)?|stack|schema)\b|\bfrom scratch\b|\bgreenfield\b|\bend.to.end\b|\bground up\b/i;
+/**
+ * Work whose scope is a whole thing rather than a part of one.
+ *
+ * One optional word is allowed between the size and the thing, because
+ * "the entire billing schema" is the same claim as "the entire
+ * schema" and the stricter pattern only saw the second. Exactly one:
+ * allowing any number would let "the entire point of this small fix" in.
+ */
+const TOP_SCOPE = /\b(entire|whole|complete)\s+(\w+\s+)?(code ?base|repo(sitory)?|project|system|app(lication)?|stack|schema|pipeline|service)\b|\bfrom scratch\b|\bgreenfield\b|\bend.to.end\b|\bground up\b/i;
 
 /** Work where being wrong costs more than the tokens ever could. */
 const TOP_STAKES = /\b(production|mission.critical|business.critical|safety.critical)\b|\bsecurity (audit|review|model)\b|\b(data loss|data corruption|corrupt the)\b|\bmoney\b/i;

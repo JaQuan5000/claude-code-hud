@@ -18,6 +18,8 @@ import { layout, tone, percentText, badgeText, shortKind, resetText } from './hu
 import { gaugeSvg, gaugeAlt } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
+import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
+import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
 
 /**
  * What the strip draws from.
@@ -39,7 +41,24 @@ const state = {
     held: false,
     contextPercent: null,
     rateLimits: [],
+    /** The last few routing decisions, for `/hud log` and `/hud tune`. */
+    log: [],
+    /** Follow-ups offered under the strip, and whether to ask for them. */
+    suggestions: [],
+    suggestOn: true,
 };
+
+/**
+ * Past this much of the five-hour window, an expensive turn asks first.
+ *
+ * The holdback is off by default, which is the right call: the tier a
+ * prompt earns is the tier it gets. The failure mode that leaves is
+ * spending the last of a window on something you would happily have run
+ * cheaper, so instead of refusing, it asks - and only when the window is
+ * nearly gone and the prompt earned an expensive tier, which is rare
+ * enough not to nag.
+ */
+const CONFIRM_ABOVE = 85;
 
 /**
  * Everything the mod can be told, in one place.
@@ -100,7 +119,7 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set <tier> <model>]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest]',
         });
 
         // The only timer in the mod, and it exists for one reason: the reset
@@ -139,20 +158,89 @@ export function register(on) {
     // and applied there.
     on('prompt.submit', async ($, e, next) => {
         state.held = false;
+        // Last turn's follow-ups are about last turn.
+        state.suggestions = [];
+
         if (!state.routing || state.pinned) {
             state.chosen = null;
             state.reason = state.pinned ? 'you picked this model' : 'routing is off';
             return next(e);
         }
+
+        // Only what the suggester can use, so the whole prompt is not held
+        // in memory until the next one replaces it.
+        state.lastPrompt = String(e.text || '').slice(0, 300);
         const tier = classify(e.text);
-        const picked = chooseModel(tier, state, opts);
+        let picked = chooseModel(tier, state, opts);
+
+        // An expensive turn with the window nearly gone is the one case worth
+        // interrupting for. Waiting inside `$.ui.ask` does not count against
+        // the hook's time limit; waiting on a promise of our own would.
+        const five = (state.rateLimits || []).find((l) => l.kind === 'five_hour');
+        const used = five && typeof five.percentUsed === 'number' ? five.percentUsed : 0;
+        const expensive = picked.tier === 'top' || picked.tier === 'deep';
+        if (expensive && used >= CONFIRM_ABOVE) {
+            const cheaper = picked.tier === 'top' ? opts.deepModel : opts.baseModel;
+            const goOn = 'Use ' + shortModel(picked.model);
+            const instead = 'Use ' + shortModel(cheaper) + ' instead';
+            let answer = goOn;
+            try {
+                answer = await $.ui.ask(
+                    'The five-hour window is ' + Math.round(used) + '% used, and this reads as '
+                        + picked.tier + ' work. Which model should it go to?',
+                    [goOn, instead, 'Cancel this prompt'],
+                );
+            } catch {
+                // Dismissed, or nobody there to ask in a -p run. Carry on as
+                // chosen rather than silently downgrading a decision.
+            }
+            if (answer === 'Cancel this prompt') {
+                return { drop: 'Cancelled, so the window keeps what was left of it.' };
+            }
+            if (answer === instead) {
+                picked = { model: cheaper, tier: picked.tier === 'top' ? 'deep' : 'base', held: true };
+            }
+        }
+
         state.chosen = picked.model;
         state.held = picked.held;
         state.reason = picked.held
-            ? tier + ' work, held at ' + picked.model + ' to spare the five-hour window'
+            ? tier + ' work, held at ' + shortModel(picked.model) + ' to spare the five-hour window'
             : tier + ' work';
+        state.log = record(state.log, {
+            tier: picked.tier,
+            short: shortModel(picked.model),
+            text: snippet(e.text),
+            signals: signalsIn(e.text),
+        });
         $.ui.invalidate('ui.render');
         return next(e);
+    });
+
+    // Follow-ups, asked for once a turn has something to follow.
+    on('turn.complete', async ($, e, next) => {
+        const result = await next(e);
+        if (!state.suggestOn || e.agentId || e.isAborted) return result;
+
+        const ask = buildSuggestPrompt(state.lastPrompt, e.answer);
+        if (!ask) return result;
+
+        try {
+            const reply = await $.model.complete({
+                model: opts.fastModel,
+                prompt: ask,
+                maxTokens: 120,
+            });
+            const picked = parseSuggestions(reply);
+            if (picked.length) {
+                state.suggestions = picked;
+                $.ui.invalidate('ui.render');
+            }
+        } catch {
+            // No suggestions is a fine outcome. It is a convenience, and a
+            // failure here must not colour the turn that just succeeded.
+        }
+        return result;
     });
 
     // A turn makes one request per step, and each one is redirected. Written as
@@ -200,6 +288,29 @@ export function register(on) {
                     + (opts.routeToTop ? ', whole-system work to ' + shortModel(opts.topModel) : '')
                     + '.',
             };
+        }
+
+        if (verb === 'log') {
+            return { text: ["What the router decided, newest last:", ...logLines(state.log)].join("\n") };
+        }
+
+        if (verb === 'tune') {
+            return { text: tuneLines(state.log).join("\n") };
+        }
+
+        if (verb === 'suggest') {
+            const how = (words[1] || '').toLowerCase();
+            if (how === 'off') {
+                state.suggestOn = false;
+                state.suggestions = [];
+                $.ui.invalidate('ui.render');
+                return { text: 'Follow-up suggestions off. Nothing will call a model on your behalf.' };
+            }
+            if (how === 'on') {
+                state.suggestOn = true;
+                return { text: 'Follow-up suggestions on, asked of ' + shortModel(opts.fastModel) + ' after each turn.' };
+            }
+            return { text: 'Suggestions are ' + (state.suggestOn ? 'on' : 'off') + '. Use /hud suggest on or /hud suggest off.' };
         }
 
         if (verb === 'models') {
@@ -252,8 +363,13 @@ export function register(on) {
             lines.push('quota: not reported for this account');
         }
         lines.push('');
-        lines.push('/hud off stops routing, /hud auto hands the choice back, /hud models lists models,');
-        lines.push('/hud set <tier> <model> changes one for this session.');
+        lines.push('');
+        lines.push('  /hud off | auto          stop routing, or hand the choice back');
+        lines.push('  /hud models              every model a tier can be set to');
+        lines.push('  /hud set <tier> <model>  point one tier somewhere else');
+        lines.push('  /hud log                 what was routed where, and why');
+        lines.push('  /hud tune                what the log says about the patterns');
+        lines.push('  /hud suggest on | off    follow-ups under the strip');
         return { text: lines.join('\n') };
     });
 
@@ -262,7 +378,7 @@ export function register(on) {
     on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
         // No early return for "nothing measured yet": the model is always
         // worth saying, and a strip that appears a turn late looks broken.
-        const { Box, Text, Svg } = $.ui.resolve(e);
+        const { Box, Text, Svg, Button } = $.ui.resolve(e);
         let model = state.chosen;
         if (!model) {
             try {
@@ -334,10 +450,35 @@ export function register(on) {
             });
         }
 
-        // Keep whatever the mods after this one drew in the band, above the
-        // strip, rather than taking the band for ourselves.
+        // The follow-ups, if the last turn produced any. Buttons rather than
+        // text, so one press sends it: a suggestion you have to retype is
+        // not a suggestion, it is a reminder.
+        const rows = [strip];
+        if (state.suggestions.length) {
+            rows.push(Box({
+                key: 'hud-next',
+                flexDirection: 'row',
+                columnGap: 2,
+                children: state.suggestions.map((text, i) => Button({
+                    key: 'hud-next-' + i,
+                    label: text,
+                    hotkey: String(i + 1),
+                    plain: true,
+                    dimColor: true,
+                    onPress: () => {
+                        state.suggestions = [];
+                        $.ui.invalidate('ui.render');
+                        $.prompt.submit({ text, asUser: true });
+                    },
+                })),
+            }));
+        }
+        const mine = rows.length === 1 ? strip : Box({ flexDirection: 'column', children: rows });
+
+        // Keep whatever the mods after this one drew in the band, above
+        // ours, rather than taking the band for ourselves.
         const theirs = await next(e);
-        if (!theirs) return strip;
-        return Box({ flexDirection: 'column', children: [theirs, strip] });
+        if (!theirs) return mine;
+        return Box({ flexDirection: 'column', children: [theirs, mine] });
     });
 }

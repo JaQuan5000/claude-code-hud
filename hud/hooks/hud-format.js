@@ -45,6 +45,8 @@ export function tone(percent) {
     return 'green';
 }
 
+import { paceOf, paceText, paceMark } from './hud-pace.js';
+
 /** The eighth-blocks, from a sliver to seven eighths of a cell. */
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
@@ -92,7 +94,7 @@ export function fillOf(percent, cells) {
  * mistaken for a short or thin block - the mistake that a light shade makes
  * in a lot of fonts.
  */
-export function barPieces(percent, cells = 10, ascii = false) {
+export function barPieces(percent, cells = 10, ascii = false, mark = null) {
     const inner = Math.max(1, cells - 2);
     const { full, edge } = fillOf(percent, inner);
     const open = ascii ? '[' : '[';
@@ -117,14 +119,25 @@ export function barPieces(percent, cells = 10, ascii = false) {
     if (edge) pieces.push({ text: ascii ? block : edge, color: tone(percent) });
 
     const used = full + (edge ? 1 : 0);
-    if (used < inner) pieces.push({ text: dot.repeat(inner - used), dim: true });
+    if (used < inner) {
+        // The pace mark sits where the fill would be if the window were
+        // being spent evenly, so fill past it means spending faster than
+        // the clock. It replaces a track character rather than being
+        // inserted, because the bar has to stay exactly `cells` wide.
+        const markAt = mark === null ? -1 : Math.round(mark * inner);
+        let track = '';
+        for (let i = used; i < inner; i += 1) {
+            track += (i === markAt && !ascii) ? '\u254e' : dot;
+        }
+        pieces.push({ text: track, dim: true });
+    }
     pieces.push({ text: ']', dim: true });
     return pieces;
 }
 
 /** The same bar as plain text, for tests, documentation and width maths. */
-export function barText(percent, cells = 10, ascii = false) {
-    return barPieces(percent, cells, ascii).map((p) => p.text).join('');
+export function barText(percent, cells = 10, ascii = false, mark = null) {
+    return barPieces(percent, cells, ascii, mark).map((p) => p.text).join('');
 }
 
 /**
@@ -199,7 +212,7 @@ export function buildGroups(state, opts = {}) {
     const now = opts.now || Date.now();
     const groups = [];
 
-    const drawBar = (percent) => barPieces(percent, cells, ascii);
+    const drawBar = (percent, mark) => barPieces(percent, cells, ascii, mark);
 
     groups.push({
         key: 'model',
@@ -229,15 +242,22 @@ export function buildGroups(state, opts = {}) {
         if (!label) continue;
         const pct = limit.percentUsed;
         const reset = resetText(limit.resetsAt, now);
+        const pace = paceOf(label, pct, limit.resetsAt, now);
+        const warning = paceText(pace);
+        const extra = [];
+        if (reset) extra.push({ text: ' ' + (ascii ? '~' : '↻') + ' ' + reset, dim: true });
+        // The pace note goes last, so a narrow window sheds it before the
+        // reset time and the reading itself.
+        if (warning) extra.push({ text: (ascii ? ' - ' : ' · ') + warning, color: 'red' });
         groups.push({
             key: label,
             pieces: [
                 { text: label + ' ', dim: true },
-                ...drawBar(pct),
+                ...drawBar(pct, paceMark(pace)),
                 { text: ' ' },
                 { text: percentText(pct), color: tone(pct) },
             ],
-            extra: reset ? [{ text: ' ' + (ascii ? '~' : '↻') + ' ' + reset, dim: true }] : [],
+            extra,
         });
     }
 

@@ -1,19 +1,25 @@
 {
   "name": "hud",
   "displayName": "HUD",
-  "version": "0.3.0",
-  "description": "Routes each request to the cheapest capable Claude model, and shows model, context and quota above the prompt",
+  "version": "0.4.0",
+  "description": "Claude Code mod: routes each request to the cheapest capable model and shows model, context and quota in your status line.",
   "author": {
     "name": "hud authors"
   },
   "license": "MIT",
   "keywords": [
+    "claude-code",
+    "claude-code-mod",
+    "claude-code-plugin",
+    "claude-mod",
     "model-routing",
     "statusline",
-    "hud",
+    "status-line",
     "token-usage",
+    "rate-limits",
     "quota",
-    "cost"
+    "cost-optimization",
+    "hud"
   ],
   "defaultEnabled": true
 }

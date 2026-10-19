@@ -1,9 +1,11 @@
-# Automatic model routing and a quota HUD for Claude Code
+# hud - a Claude Code mod for automatic model routing and a quota status line
 
-`hud` is a Claude Code mod that does two things:
+A **Claude Code mod** that cuts what a session costs and shows you where you stand. It installs as a Claude Code plugin and does two things:
 
 - **Routes each request to the cheapest capable model.** A typo fix goes to Haiku. Everyday work goes to Sonnet. A planning job goes to Opus. A whole-system brief goes to Fable. You stop spending frontier quota on one-line edits, and you stop under-powering the work that deserves the best model.
 - **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and each rate-limit window with how long until it resets.
+- **Warns you before you run dry.** It knows when each window resets, so it can tell whether 91% used is fine or a problem, and say how long you have at the rate you are going.
+- **Offers what to do next.** After a turn, two or three follow-ups you can send with one key.
 
 ```
 sonnet 5.5 auto │ Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
@@ -25,12 +27,23 @@ In a narrow window it loses detail before it loses data: the bars shrink to eigh
 
 ## Install
 
+Run these at your **shell** prompt, not inside Claude Code - they are shell commands, and Claude Code's prompt is not a shell.
+
 ```bash
 claude plugin marketplace add JaQuan5000/claude-code-hud
 claude plugin install hud@hud-mods
 ```
 
-To remove it:
+### Update
+
+```bash
+claude plugin marketplace update hud-mods
+claude plugin update hud@hud-mods
+```
+
+Restart Claude Code afterwards. An installed plugin is cached by version, so an update only takes once the version has changed.
+
+### Uninstall
 
 ```bash
 claude plugin uninstall hud@hud-mods
@@ -42,6 +55,18 @@ To turn it off without uninstalling, run `/plugin` and disable it there, or `/hu
 Needs Claude Code CLI v2.1.287 or later, or Desktop v2.1.286 or later. Mods do not run in WSL sessions.
 
 Once installed it loads on **every** session on that machine, CLI and Desktop alike, with no flag and nothing to run. Install it on each machine you want it on - installs are per user, not shared across your servers. To turn it off, use `/plugin`, or `/hud off` to keep the readout and stop only the routing. It is off entirely in a session started with `--safe-mode` or `--bare`, or where `disableAllHooks` or your organization's managed settings block mods.
+
+## What is a Claude Code mod?
+
+A **mod** is a Claude Code plugin that runs JavaScript against Claude Code's own events, rather than shelling out to a script. Settings hooks can watch a tool call and block it; a mod can change what Claude Code draws, add commands, and - the reason this one exists - redirect a request to a different model before it is sent.
+
+Mods need Claude Code CLI v2.1.287 or Desktop v2.1.286 and newer. They are a different thing from:
+
+- **A status line**, which is a script that prints one line and cannot change behaviour. This mod draws its own readout instead, so it works in the Desktop app as well as the terminal.
+- **A skill**, which is instructions Claude reads. A mod is code Claude Code runs.
+- **An MCP server**, which gives Claude new tools. A mod changes Claude Code itself.
+
+If you are looking for a Claude Code status line, a Claude Code token usage or rate limit display, or automatic model switching to cut your Claude usage, this is a mod that does all three at once.
 
 ## How the routing decides
 
@@ -82,6 +107,50 @@ Out of the box it never holds back: the tier a prompt earns is the tier it gets,
 
 It steps down one rung at a time rather than all the way: `top` becomes `deep`, and `deep` becomes `base`. Whole-system work is still whole-system work when the quota is thin.
 
+## Pacing: will you run dry before the reset?
+
+A window at 91% is fine with twenty minutes left and a disaster with four hours left, and the percentage alone cannot tell you which. Each reading carries a reset time, and each window has a known length, so the mod works out how far through the clock you are and compares it with how far through the quota you are.
+
+```
+Session [██████▌╎·]  91% ↻ 3h41m · 3.5x pace, dry in 8m
+Session [████╎···]  50% ↻ 2h30m
+```
+
+The `╎` is where the fill would be if you were spending evenly. Fill past it means you are ahead of the clock. It says nothing at all below 1.5x, because a readout that comments on every mild overspend stops being read, and nothing when a window is simply nearly over - 91% used with twenty minutes left is what a spent window is supposed to look like.
+
+## A confirmation you will rarely see
+
+Routing never holds back by default: the tier a prompt earns is the tier it gets. The failure that leaves is spending the last of a window on something you would happily have run cheaper. So when the five-hour window is past 85% **and** the prompt earned an expensive tier, it asks:
+
+> The five-hour window is 91% used, and this reads as top work. Which model should it go to?
+> Use fable 5.1 / Use opus 5.5 instead / Cancel this prompt
+
+Both conditions have to hold, which is rare enough not to nag. In a `claude -p` run, where there is nobody to ask, it carries on as chosen rather than silently downgrading.
+
+## Follow-ups under the strip
+
+After a turn, the mod offers two or three next steps, each a key press away:
+
+```
+1: Run the parser tests   2: Add a case for empty input   3: Update the README
+```
+
+They come from the cheap model reading the turn that just finished, so they are specific to the work rather than stock phrases. This is the one place the mod spends anything: a few hundred tokens of Haiku per turn, with the request capped so a long turn cannot become a long bill. `/hud suggest off` stops it entirely, and nothing else in the mod calls a model.
+
+It sends a trimmed slice of the prompt and the answer - the same conversation Claude already has, to the same place it already goes. Nothing is stored, nothing is written to disk, and nothing reaches any third party. With suggestions off, the mod makes no requests at all.
+
+## Tuning the routing on real data
+
+The routing is a pile of regular expressions, and when one gets a prompt wrong there is nothing to look at. `/hud log` shows what was decided and which words decided it:
+
+```
+fast  haiku 5.5   "fix the typo in the footer"        [typo]
+deep  opus 5.5    "why does the sync layer deadlock"  [deadlock, why does]
+base  sonnet 5.5  "add a column for last sync time"   [no signal]
+```
+
+`/hud tune` reads those same records back and says what they imply - a tier that never fires has patterns too narrow, a tier that catches everything has patterns too broad - and lists the words that keep turning up in middle-tier prompts, so you can promote the ones that mean something. It only suggests a word it has seen in more than one prompt, because a rule built from a single sample is a rule that overfits to whatever you did last.
+
 ## Commands
 
 | Command | What it does |
@@ -90,6 +159,9 @@ It steps down one rung at a time rather than all the way: `top` becomes `deep`, 
 | `/hud off` | Stops routing. The readout stays. |
 | `/hud auto` | Starts routing again, and clears a pin |
 | `/hud models` | Lists every model a tier can be set to |
+| `/hud log` | What was routed where, and which words decided it |
+| `/hud tune` | What the log says about your patterns |
+| `/hud suggest on` / `off` | Follow-up suggestions under the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
 
 ## Settings
@@ -113,11 +185,14 @@ Every model must be a full id, for the reason given under [Choosing the models](
 
 ## What it costs to run
 
-Nothing measurable, by design:
+Almost nothing, and the one thing that does cost is named here rather than buried:
 
-- **No polling and no timers.** The numbers come from `$.session.usage()`, read when Claude Code says a limit moved (`session.measure`) and once at session start.
-- **No model call to classify.** The tier comes from a regular expression. Asking a model which model to use would spend a request to save a request.
-- **One timer, for one reason.** The reset times are a countdown, which is wrong within a minute if nobody redraws it, so the strip redraws once a minute. That redraw reads numbers already in memory and makes no requests. Everything else is driven by events.
+- **No polling.** The numbers come from `$.session.usage()`, read when Claude Code says a limit moved (`session.measure`) and once at session start.
+- **No model call to route.** The tier comes from a regular expression. Asking a model which model to use would spend a request to save a request, which is the joke this mod would become.
+- **One timer, for one reason.** The reset times are a countdown, which is wrong within a minute if nobody redraws it, so the strip redraws once a minute. That redraw reads numbers already in memory and makes no requests.
+- **One model call, and only for follow-ups.** The suggestions under the strip are written by the cheap model reading the turn that just ended: a few hundred input tokens and a ceiling of 120 out, on Haiku, once per turn. At Haiku's rates that is a fraction of a cent, and it is the only request the mod ever makes on your behalf. `/hud suggest off` removes it entirely.
+
+The arithmetic that matters: routing one planning turn from Opus to Haiku saves far more than every suggestion in a long session costs. If you would rather it spent nothing at all, turn suggestions off and it spends nothing at all.
 
 ### Choosing the models
 
@@ -147,7 +222,8 @@ The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and 
 Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses five calls:
 
 ```
-$.command.register   $.session.model   $.session.usage   $.ui.invalidate   $.ui.resolve
+$.clock.every   $.command.register   $.model.complete   $.prompt.submit
+$.session.model   $.session.usage   $.ui.ask   $.ui.invalidate   $.ui.resolve
 ```
 
 No filesystem, no network, no subprocesses, no environment variables, no MCP. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.

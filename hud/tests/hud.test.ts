@@ -12,6 +12,9 @@ import { expect, test } from 'claude-code/testing';
 
 import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
 import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js';
+import { paceOf, paceText, paceMark, FAST_RATIO } from '../hooks/hud-pace.js';
+import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
+import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hooks/hud-suggest.js';
 import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, shortKind, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
@@ -31,7 +34,7 @@ const TIGHT = { rateLimits: [{ kind: 'five_hour', percentUsed: 91, resetsAt: 0 }
 test('planning work reads as deep', async () => {
     expect(classify('plan out the migration for the sync layer')).toBe('deep');
     expect(classify('why does this deadlock on the second connection?')).toBe('deep');
-    expect(classify('refactor the bookmarks panel')).toBe('deep');
+    expect(classify('refactor the settings panel')).toBe('deep');
 });
 
 test('a typo fix reads as fast', async () => {
@@ -54,7 +57,7 @@ test('a long prompt is deep however it is worded', async () => {
 
 test('a planning prompt that also says rename is still deep', async () => {
     // Both patterns match, and the expensive signal is the reliable one.
-    expect(classify('plan the rename of every bookmark field')).toBe('deep');
+    expect(classify('plan the rename of every customer field')).toBe('deep');
 });
 
 test('asking for the best model in words is enough on its own', async () => {
@@ -85,7 +88,7 @@ test('a long planning-shaped brief reaches the flagship', async () => {
 test('planning on its own is only deep, never the flagship', async () => {
     // Otherwise every design question would go to the most expensive model.
     expect(classify('plan out the migration for the sync layer')).toBe('deep');
-    expect(classify('refactor the bookmarks panel')).toBe('deep');
+    expect(classify('refactor the settings panel')).toBe('deep');
     expect(classify('why does this deadlock?')).toBe('deep');
 });
 
@@ -414,4 +417,218 @@ test('an id the catalogue has never heard of still prints sensibly', async () =>
     expect(shortModel('claude-newthing-6-2')).toBe('newthing 6.2');
     expect(shortModel('something-else')).toBe('something-else');
     expect(shortModel('')).toBe('');
+});
+
+const NOW = Date.UTC(2026, 9, 19, 12, 0, 0);
+const resetIn = (m: number) => Math.floor((NOW + m * 60000) / 1000);
+
+test('on pace says nothing', async () => {
+    // Half the window used at half past is exactly on pace.
+    const p = paceOf('Session', 50, resetIn(150), NOW);
+    expect(p !== null).toBe(true);
+    expect(Math.abs(p.ratio - 1) < 0.01).toBe(true);
+    expect(paceText(p)).toBe('');
+});
+
+test('burning fast says how fast, and when it runs out', async () => {
+    const p = paceOf('Session', 91, resetIn(221), NOW);
+    expect(p.ratio > 3).toBe(true);
+    expect(/pace/.test(paceText(p))).toBe(true);
+    expect(/dry in/.test(paceText(p))).toBe(true);
+});
+
+test('a window nearly over is not a warning just because it is nearly full', async () => {
+    // 91% used with 20 minutes left is what a spent window looks like.
+    // Warning there would make the warning meaningless.
+    const p = paceOf('Session', 91, resetIn(20), NOW);
+    expect(p.ratio < FAST_RATIO).toBe(true);
+    expect(paceText(p)).toBe('');
+});
+
+test('a mild overspend stays quiet, so the warning keeps its meaning', async () => {
+    for (const [pct, left] of [[31, 228], [45, 210], [60, 165]]) {
+        const p = paceOf('Session', pct, resetIn(left), NOW);
+        if (p.ratio < FAST_RATIO) expect(paceText(p)).toBe('');
+    }
+});
+
+test('pacing refuses to guess when it cannot know', async () => {
+    expect(paceOf('Nope', 50, resetIn(60), NOW)).toBe(null);
+    expect(paceOf('Session', 50, 0, NOW)).toBe(null);
+    expect(paceOf('Session', 50, 'x' as unknown as number, NOW)).toBe(null);
+    expect(paceOf('Session', 50, resetIn(-10), NOW)).toBe(null);
+    expect(paceText(null)).toBe('');
+    expect(paceMark(null)).toBe(null);
+});
+
+test('an untouched window is never a warning', async () => {
+    const p = paceOf('Week', 0, resetIn(3 * 1440), NOW);
+    expect(p.ratio).toBe(0);
+    expect(paceText(p)).toBe('');
+});
+
+test('the pace mark sits in the track without changing the bar width', async () => {
+    for (const mark of [0, 0.25, 0.5, 0.9, 1]) {
+        expect(barText(30, 10, false, mark).length).toBe(10);
+    }
+    expect(barText(30, 10, false, 0.75).indexOf('╎') >= 0).toBe(true);
+    expect(barText(30, 10, false, null).indexOf('╎') >= 0).toBe(false);
+});
+
+test('a mark under the fill is hidden, which is the point', async () => {
+    // Fill past the mark means ahead of the clock; the mark only shows
+    // while there is still track to its right.
+    expect(barText(95, 10, false, 0.1).indexOf('╎') >= 0).toBe(false);
+});
+
+test('the ascii bar carries no mark, since it has no character for one', async () => {
+    expect(barText(30, 10, true, 0.5).indexOf('╎') >= 0).toBe(false);
+    expect(barText(30, 10, true, 0.5).length).toBe(10);
+});
+
+test('the log keeps the newest and drops the oldest', async () => {
+    let log = record([], { tier: 'base', text: 'p0', signals: [] });
+    for (let i = 1; i < KEEP + 5; i += 1) {
+        log = record(log, { tier: 'base', text: 'p' + i, signals: [] });
+    }
+    expect(log.length).toBe(KEEP);
+    expect(log[log.length - 1].text).toBe('p' + (KEEP + 4));
+    expect(log[0].text).toBe('p5');
+});
+
+test('a decision records which words fired, not just the tier', async () => {
+    const found = signalsIn('plan the entire migration, no shortcuts');
+    expect(found.indexOf('plan') >= 0).toBe(true);
+    expect(found.indexOf('entire') >= 0).toBe(true);
+    expect(found.indexOf('no shortcuts') >= 0).toBe(true);
+});
+
+test('signals match whole words, so planet is not plan', async () => {
+    expect(signalsIn('render the planet mesh').indexOf('plan') >= 0).toBe(false);
+    expect(signalsIn('formatting').indexOf('formatting') >= 0).toBe(true);
+    expect(signalsIn('formatting').indexOf('format') >= 0).toBe(false);
+});
+
+test('a prompt is kept as a snippet, never in full', async () => {
+    expect(snippet('x'.repeat(400)).length < 60).toBe(true);
+    expect(snippet('   fix   the  typo  ')).toBe('fix the typo');
+});
+
+test('an empty log says so rather than printing nothing', async () => {
+    expect(logLines([]).length).toBe(1);
+    expect(/Nothing routed/.test(logLines([])[0])).toBe(true);
+});
+
+test('tuning says nothing until there is something to say', async () => {
+    expect(/Not enough/.test(tuneLines([])[0])).toBe(true);
+    expect(/Not enough/.test(tuneLines([{ tier: 'base', text: 'a' }])[0])).toBe(true);
+});
+
+test('tuning notices a tier that never fires', async () => {
+    const log = [...Array(8)].map((unused, i) => ({ tier: 'base', text: 'update the readme ' + i }));
+    const text = tuneLines(log).join('\n');
+    expect(/cheap tier/.test(text)).toBe(true);
+    expect(/middle tier/.test(text)).toBe(true);
+});
+
+test('tuning suggests only words it saw more than once', async () => {
+    const log = [
+        { tier: 'base', text: 'update the docs' },
+        { tier: 'base', text: 'update the docs again' },
+        { tier: 'base', text: 'kubernetes autoscaler thing' },
+        { tier: 'base', text: 'another docs change' },
+        { tier: 'base', text: 'more docs work' },
+    ];
+    const words = commonWords(log).map((pair) => pair[0]);
+    expect(words.indexOf('docs') >= 0).toBe(true);
+    // A word seen once must not become a rule.
+    expect(words.indexOf('kubernetes') >= 0).toBe(false);
+});
+
+test('tuning ignores filler words', async () => {
+    const log = [...Array(6)].map(() => ({ tier: 'base', text: 'please can you just make the thing' }));
+    const words = commonWords(log).map((pair) => pair[0]);
+    for (const filler of ['please', 'can', 'you', 'just', 'the']) {
+        expect(words.indexOf(filler) >= 0).toBe(false);
+    }
+});
+
+test('the suggestion request carries the work and asks for bare lines', async () => {
+    const ask = buildSuggestPrompt('fix the parser', 'I changed parser.js and added a test.');
+    expect(/fix the parser/.test(ask)).toBe(true);
+    expect(/parser\.js/.test(ask)).toBe(true);
+    expect(/No numbering/.test(ask)).toBe(true);
+    expect(buildSuggestPrompt('', '')).toBe(null);
+});
+
+test('the request is capped, so a long turn cannot become a long bill', async () => {
+    const huge = 'word '.repeat(5000);
+    const ask = buildSuggestPrompt(huge, huge);
+    expect(ask.length < 1800).toBe(true);
+    expect(ask.length < huge.length / 10).toBe(true);
+});
+
+test('a tidy answer parses to exactly the suggestions', async () => {
+    const reply = ['Run the parser tests', 'Add a case for empty input', 'Update the README'].join('\n');
+    expect(parseSuggestions(reply)).toEqual(['Run the parser tests', 'Add a case for empty input', 'Update the README']);
+});
+
+test('a messy answer is cleaned rather than shown raw', async () => {
+    const messy = [
+        'Sure! Here are three ideas:',
+        '1. Run the parser tests',
+        '- "Add a case for empty input"',
+        '* Update the README for the new flag',
+        'This one is far too long to be a button and ought to be dropped by the parser entirely',
+        'Run the parser tests',
+    ].join('\n');
+    const out = parseSuggestions(messy);
+    expect(out.length).toBe(3);
+    expect(out.some((x) => /^(sure|here)/i.test(x))).toBe(false);
+    expect(out.some((x) => /^[-*\d]/.test(x))).toBe(false);
+    expect(out.some((x) => x.indexOf('"') >= 0)).toBe(false);
+    expect(out.some((x) => x.length > MAX_LENGTH)).toBe(false);
+    expect(new Set(out).size).toBe(out.length);
+});
+
+test('nothing usable produces nothing, rather than junk', async () => {
+    for (const bad of ['', null, undefined, 'Okay', 'Here you go:', 'word', '   ']) {
+        expect(parseSuggestions(bad as string)).toEqual([]);
+    }
+});
+
+test('it never offers more than it has room for', async () => {
+    const many = [...Array(20)].map((unused, i) => 'Do the thing number ' + i).join('\n');
+    expect(parseSuggestions(many).length).toBe(WANTED);
+});
+
+test('an object reply is read as well as a string', async () => {
+    const reply = { text: ['Run the tests now', 'Check the log file'].join('\n') };
+    expect(parseSuggestions(reply)).toEqual(['Run the tests now', 'Check the log file']);
+});
+
+test('one word may sit between the size and the thing', async () => {
+    // "the entire billing schema" is the same claim as "the entire
+    // schema", and the stricter pattern only saw the second.
+    expect(classify('plan the migration of the entire billing schema')).toBe('top');
+    expect(classify('plan the entire payment pipeline')).toBe('top');
+    expect(classify('design the whole billing service')).toBe('top');
+});
+
+test('but only one, or any big-sounding phrase would qualify', async () => {
+    // "the entire point of this small fix" is not a whole-system brief.
+    expect(classify('that is the entire point of this small fix')).not.toBe('top');
+    expect(classify('plan the entire point of the small schema change')).not.toBe('top');
+});
+
+test('the log lines up in columns', async () => {
+    // The padding used to be applied to the closing quote rather than to
+    // the text, so nothing lined up and the reasons wandered.
+    const entries = [
+        { tier: 'fast', short: 'haiku 5.5', text: 'short one', signals: ['typo'] },
+        { tier: 'deep', short: 'opus 5.5', text: 'a considerably longer prompt than that one', signals: ['plan'] },
+    ];
+    const lines = logLines(entries);
+    const at = lines.map((l) => l.indexOf('['));
+    expect(at[0]).toBe(at[1]);
 });
