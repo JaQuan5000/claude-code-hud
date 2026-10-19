@@ -33,21 +33,27 @@ export function tone(percent) {
 }
 
 /**
- * A bar, as characters.
+ * A bar, as two runs of the same character.
  *
  * Ten cells by default, which puts one block to a clean ten percent. The
  * filled count rounds rather than truncating, so anything above zero shows at
  * least part of a block: a window at 4% that drew as empty would read as
- * untouched.
+ * untouched. The reverse guard keeps 99% from drawing as full.
+ *
+ * Both runs are the **same** glyph, and only the colour differs. An earlier
+ * version paired a full block with a shade character, and whether those two
+ * look like one bar depends entirely on the terminal's font: the shade is
+ * drawn with less ink, so in some fonts it reads as shorter or thinner and
+ * the bar looks like a broken staircase rather than a track with a fill. One
+ * glyph cannot disagree with itself.
  */
 export function bar(percent, cells = 10, ascii = false) {
-    const full = ascii ? '#' : '█';
-    const empty = ascii ? '.' : '░';
+    const glyph = ascii ? '#' : '█';
     const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
     let filled = Math.round((clamped / 100) * cells);
     if (clamped > 0 && filled === 0) filled = 1;
     if (clamped < 100 && filled === cells) filled = cells - 1;
-    return full.repeat(filled) + empty.repeat(cells - filled);
+    return { filled: glyph.repeat(filled), empty: glyph.repeat(cells - filled), cells };
 }
 
 /**
@@ -108,6 +114,22 @@ export function buildGroups(state, opts = {}) {
     const now = opts.now || Date.now();
     const groups = [];
 
+    /**
+     * The two runs of a bar, as pieces.
+     *
+     * The filled run takes the colour for the reading and the empty run is
+     * dimmed, which is what makes one glyph read as a track with a fill. A
+     * run of length zero is left out rather than pushed as an empty `Text`,
+     * which would be a child with nothing in it.
+     */
+    const barPieces = (percent) => {
+        const parts = bar(percent, cells, ascii);
+        const out = [];
+        if (parts.filled) out.push({ text: parts.filled, color: tone(percent) });
+        if (parts.empty) out.push({ text: parts.empty, dim: true });
+        return out;
+    };
+
     groups.push({
         key: 'model',
         pieces: [
@@ -123,7 +145,7 @@ export function buildGroups(state, opts = {}) {
             key: 'ctx',
             pieces: [
                 { text: 'ctx ', dim: true },
-                { text: bar(state.contextPercent, cells, ascii), color: tone(state.contextPercent) },
+                ...barPieces(state.contextPercent),
                 { text: ' ' },
                 { text: percentText(state.contextPercent), color: tone(state.contextPercent) },
             ],
@@ -140,7 +162,7 @@ export function buildGroups(state, opts = {}) {
             key: label,
             pieces: [
                 { text: label + ' ', dim: true },
-                { text: bar(pct, cells, ascii), color: tone(pct) },
+                ...barPieces(pct),
                 { text: ' ' },
                 { text: percentText(pct), color: tone(pct) },
             ],

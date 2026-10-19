@@ -44,6 +44,8 @@ export function register(on, options = {}) {
         fastModel: options.fast_model || 'haiku',
         baseModel: options.base_model || 'sonnet',
         deepModel: options.deep_model || 'opus',
+        topModel: options.top_model || 'fable',
+        routeToTop: options.route_to_top !== false,
         spareAbove: typeof options.spare_quota_above === 'number' ? options.spare_quota_above : 85,
         barCells: typeof options.bar_cells === 'number' ? options.bar_cells : 10,
         ascii: !!options.ascii,
@@ -98,7 +100,7 @@ export function register(on, options = {}) {
         state.chosen = picked.model;
         state.held = picked.held;
         state.reason = picked.held
-            ? 'planning, held at ' + picked.model + ' to spare the five-hour window'
+            ? tier + ' work, held at ' + picked.model + ' to spare the five-hour window'
             : tier + ' work';
         $.ui.invalidate('ui.render');
         return next(e);
@@ -140,7 +142,12 @@ export function register(on, options = {}) {
             state.routing = true;
             state.pinned = false;
             $.ui.invalidate('ui.render');
-            return { text: 'Routing on. Small work goes to ' + opts.fastModel + ', planning to ' + opts.deepModel + '.' };
+            return {
+                text: 'Routing on. Small work goes to ' + opts.fastModel
+                    + ', planning to ' + opts.deepModel
+                    + (opts.routeToTop ? ', whole-system work to ' + opts.topModel : '')
+                    + '.',
+            };
         }
         const lines = [
             'routing: ' + (state.routing ? 'on' : 'off') + (state.pinned ? ', standing down because you picked a model' : ''),

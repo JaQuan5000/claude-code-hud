@@ -10,17 +10,22 @@
 
 import { expect, test } from 'claude-code/testing';
 
-import { classify, chooseModel, LONG_PROMPT } from '../hooks/hud-route.js';
+import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
 import { bar, fit, layout, buildGroups, percentText, modelText, resetText, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
     fastModel: 'haiku',
     baseModel: 'sonnet',
     deepModel: 'opus',
+    topModel: 'fable',
+    routeToTop: true,
     spareAbove: 85,
     barCells: 10,
     ascii: false,
 };
+
+const ROOMY = { rateLimits: [{ kind: 'five_hour', percentUsed: 20, resetsAt: 0 }] };
+const TIGHT = { rateLimits: [{ kind: 'five_hour', percentUsed: 91, resetsAt: 0 }] };
 
 test('planning work reads as deep', async () => {
     expect(classify('plan out the migration for the sync layer')).toBe('deep');
@@ -51,6 +56,67 @@ test('a planning prompt that also says rename is still deep', async () => {
     expect(classify('plan the rename of every bookmark field')).toBe('deep');
 });
 
+test('asking for the best model in words is enough on its own', async () => {
+    // Second-guessing someone who wrote "use the best model" is not thrift.
+    expect(classify('use the best model for this')).toBe('top');
+    expect(classify('think really hard about this one')).toBe('top');
+    expect(classify('use fable here')).toBe('top');
+    expect(classify('no shortcuts on this')).toBe('top');
+});
+
+test('planning plus whole-system scope reaches the flagship', async () => {
+    expect(classify('design the architecture for the entire system')).toBe('top');
+    expect(classify('plan a rewrite of the whole codebase')).toBe('top');
+    expect(classify('design the schema from scratch')).toBe('top');
+});
+
+test('planning plus real stakes reaches the flagship', async () => {
+    expect(classify('plan the migration of the production database')).toBe('top');
+    expect(classify('design a fix for the data loss in the sync layer')).toBe('top');
+});
+
+test('a long planning-shaped brief reaches the flagship', async () => {
+    const brief = 'plan this out. ' + 'here is more context about the system. '.repeat(40);
+    expect(brief.length >= BRIEF_PROMPT).toBe(true);
+    expect(classify(brief)).toBe('top');
+});
+
+test('planning on its own is only deep, never the flagship', async () => {
+    // Otherwise every design question would go to the most expensive model.
+    expect(classify('plan out the migration for the sync layer')).toBe('deep');
+    expect(classify('refactor the bookmarks panel')).toBe('deep');
+    expect(classify('why does this deadlock?')).toBe('deep');
+});
+
+test('scope or stakes without planning is not the flagship', async () => {
+    expect(classify('run the tests for the entire project')).not.toBe('top');
+    expect(classify('restart production')).not.toBe('top');
+});
+
+test('the flagship tier routes to the flagship when there is room', async () => {
+    const picked = chooseModel('top', ROOMY, OPTS);
+    expect(picked.model).toBe('fable');
+    expect(picked.held).toBe(false);
+});
+
+test('a thin window steps the flagship down one rung, not to the cheap end', async () => {
+    // Whole-system work is still whole-system work when quota is short.
+    const picked = chooseModel('top', TIGHT, OPTS);
+    expect(picked.model).toBe('opus');
+    expect(picked.tier).toBe('deep');
+    expect(picked.held).toBe(true);
+});
+
+test('turning route_to_top off makes the flagship tier behave as deep', async () => {
+    const off = { ...OPTS, routeToTop: false };
+    expect(chooseModel('top', ROOMY, off).model).toBe('opus');
+    expect(chooseModel('top', TIGHT, off).model).toBe('sonnet');
+});
+
+test('an empty top_model also falls back to deep', async () => {
+    expect(chooseModel('top', ROOMY, { ...OPTS, topModel: '' }).model).toBe('opus');
+});
+
 test('routing up is held back when the five-hour window is nearly gone', async () => {
     const tight = { rateLimits: [{ kind: 'five_hour', percentUsed: 91, resetsAt: 0 }] };
     const picked = chooseModel('deep', tight, OPTS);
@@ -72,21 +138,39 @@ test('small work is never held back, since holding it saves nothing', async () =
 
 test('a bar is always its stated width', async () => {
     for (const pct of [0, 1, 37, 99, 100, -5, 140]) {
-        expect(bar(pct, 10).length).toBe(10);
-        expect(bar(pct, 8).length).toBe(8);
+        for (const cells of [10, 8]) {
+            const { filled, empty } = bar(pct, cells);
+            expect(filled.length + empty.length).toBe(cells);
+        }
+    }
+});
+
+test('both halves of a bar are the same character, so they cannot differ in height', async () => {
+    // A full block paired with a shade character looks like one bar in some
+    // fonts and a broken staircase in others. One glyph can't disagree with
+    // itself, and colour carries filled against empty.
+    for (const pct of [0, 1, 50, 99, 100]) {
+        const { filled, empty } = bar(pct, 10);
+        const glyphs = new Set((filled + empty).split(''));
+        expect(glyphs.size <= 1).toBe(true);
+        if (glyphs.size === 1) expect([...glyphs][0]).toBe('\u2588');
     }
 });
 
 test('a bar distinguishes empty, nearly empty, nearly full and full', async () => {
     // 4% drawing as empty would read as a window nobody has touched.
-    expect(bar(0, 10)).toBe('\u2591'.repeat(10));
-    expect(bar(4, 10).indexOf('\u2588')).toBe(0);
-    expect(bar(99, 10).indexOf('\u2591') >= 0).toBe(true);
-    expect(bar(100, 10)).toBe('\u2588'.repeat(10));
+    expect(bar(0, 10).filled).toBe('');
+    expect(bar(0, 10).empty.length).toBe(10);
+    expect(bar(4, 10).filled.length).toBe(1);
+    expect(bar(99, 10).empty.length).toBe(1);
+    expect(bar(100, 10).filled.length).toBe(10);
+    expect(bar(100, 10).empty).toBe('');
 });
 
 test('the ascii bar is for a terminal that is not in UTF-8', async () => {
-    expect(bar(50, 4, true)).toBe('##..');
+    const { filled, empty } = bar(50, 4, true);
+    expect(filled).toBe('##');
+    expect(empty).toBe('##');
 });
 
 test('percentages and model names keep a fixed width, so nothing jitters', async () => {
@@ -160,8 +244,11 @@ test('an unknown rate-limit window is left out rather than printed raw', async (
 });
 
 test('a roomy window gets the full bar width', async () => {
+    // The bar is two pieces now, so measure the run of blocks, not one piece.
     const pieces = layout(FULL, 120, OPTS);
-    expect(pieces.some((p) => p.text.length === OPTS.barCells && /^[█░]+$/.test(p.text))).toBe(true);
+    const blocks = pieces.filter((p) => /^█+$/.test(p.text));
+    expect(blocks.length >= 2).toBe(true);
+    expect(blocks.slice(0, 2).reduce((n, p) => n + p.text.length, 0)).toBe(OPTS.barCells);
 });
 
 test('a narrow window narrows the bars rather than losing a reading', async () => {

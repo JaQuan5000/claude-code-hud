@@ -40,6 +40,18 @@
       "description": "Used for planning, design, refactors and debugging.",
       "default": "opus"
     },
+    "top_model": {
+      "type": "string",
+      "title": "Model for whole-system work",
+      "description": "The flagship model, for a brief that covers an entire system or where being wrong is expensive. Leave empty to never route here automatically.",
+      "default": "fable"
+    },
+    "route_to_top": {
+      "type": "boolean",
+      "title": "Route up to the flagship model",
+      "description": "Off leaves the flagship model out of automatic routing. You can still choose it yourself with /model.",
+      "default": true
+    },
     "spare_quota_above": {
       "type": "number",
       "title": "Stop routing up at",
