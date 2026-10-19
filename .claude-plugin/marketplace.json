@@ -1,0 +1,25 @@
+{
+  "name": "hud-mods",
+  "description": "A Claude Code mod for model routing and a quota readout",
+  "owner": {
+    "name": "hud-mods"
+  },
+  "plugins": [
+    {
+      "name": "hud",
+      "source": "./hud",
+      "description": "Routes each request to the cheapest capable Claude model, and shows model, context and quota above the prompt",
+      "category": "productivity",
+      "tags": [
+        "model-routing",
+        "statusline",
+        "token-usage",
+        "quota",
+        "cost"
+      ]
+    }
+  ],
+  "metadata": {
+    "description": "A Claude Code mod for model routing and a quota readout"
+  }
+}

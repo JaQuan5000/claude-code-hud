@@ -1,0 +1,4 @@
+{
+  "description": "The hud hooks module",
+  "modules": ["./register.js"]
+}
