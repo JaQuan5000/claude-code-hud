@@ -14,17 +14,20 @@
  * that overrode your own `/model` on the next message would be intolerable.
  */
 
-import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
-import { gaugeSvg, gaugeAlt } from './hud-svg.js';
+import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText, planBar } from './hud-format.js';
+import { gaugeSvg, gaugeAlt, progressSvg, progressAlt } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
 import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
 import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
 import { readUsage, describeUsage } from './hud-usage.js';
-import { spawned, addTokens, tokensOf, merge, visible, prune, shares,
+import { spawned, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, isAlive } from './hud-agents.js';
 import { assess, previewFor, countLines, describe, warningFor } from './hud-blast.js';
 import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
+import { readingsFor, worstLevel, needsClock, leadNote, clockText,
+    CALM, WATCH, URGENT } from './hud-focus.js';
+import { todosFrom, progressOf, countText, worthShowing } from './hud-progress.js';
 
 /**
  * What the strip draws from.
@@ -46,6 +49,16 @@ const state = {
     held: false,
     contextPercent: null,
     rateLimits: [],
+    clockWanted: false,
+    clockRunning: false,
+    /**
+     * The plan the turn is working through, from the todo list.
+     *
+     * Null when there is no plan: most turns answer a question and need no
+     * bar. See hud-progress.js for why the todo list is the one honest
+     * denominator available.
+     */
+    plan: null,
     /** The last few routing decisions, for `/hud log` and `/hud tune`. */
     log: [],
     /** Follow-ups offered under the strip, and whether to ask for them. */
@@ -166,6 +179,62 @@ async function headsUp($, e) {
     }
 }
 
+/** Green while nothing needs you, amber when something does, red when it is nearly gone. */
+function readingColor(level) {
+    if (level === URGENT) return 'red';
+    if (level === WATCH) return 'yellow';
+    return 'green';
+}
+
+/**
+ * Where the fill would be if the window were being spent evenly.
+ *
+ * Fill past the mark means spending faster than the clock. Without a pace to
+ * draw from the gauge keeps its own default mark, which is the edge of the
+ * red band - still a useful thing to see coming.
+ */
+function markFor(reading) {
+    const elapsed = reading.pace && reading.pace.elapsed;
+    if (typeof elapsed !== 'number') return undefined;
+    return Math.max(0, Math.min(100, elapsed * 100));
+}
+
+/** The reset, written the way this distance from it deserves. */
+function resetFor(reading) {
+    if (reading.resetForm === 'countdown') {
+        const t = resetText(reading.resetsAt);
+        return t ? '↻ ' + t : '';
+    }
+    if (reading.resetForm === 'clock') {
+        const t = clockText(reading.resetsAt);
+        return t ? '↻ ' + t : '';
+    }
+    return '';
+}
+
+/**
+ * Run the per-minute redraw only while a countdown is on screen.
+ *
+ * The strip used to redraw every minute from startup to shutdown, whether or
+ * not anything on it changed by the minute - roughly 1,400 wake-ups a day to
+ * keep two numbers honest. Now the loop is started by the first countdown
+ * and stops itself when the last one goes, so the usual state costs nothing.
+ */
+function wantClock($, wanted) {
+    state.clockWanted = !!wanted;
+    if (!wanted || state.clockRunning) return;
+    state.clockRunning = true;
+    const tick = () => {
+        if (!state.clockWanted) {
+            state.clockRunning = false;
+            return;
+        }
+        $.ui.invalidate('ui.render');
+        $.clock.after(60000, tick);
+    };
+    $.clock.after(60000, tick);
+}
+
 async function pollAgents($) {
     if (state.agentTimer) return;
     state.agentTimer = true;
@@ -203,12 +272,9 @@ export function register(on) {
             argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|agents]',
         });
 
-        // The only timer in the mod, and it exists for one reason: the reset
-        // times are a countdown now, and a countdown nobody redraws is wrong
-        // within a minute. Everything else here is driven by events. One
-        // redraw a minute reads the numbers already in `state`, so it costs a
-        // hook call and no requests.
-        $.clock.every(60000, () => $.ui.invalidate('ui.render'));
+        // No timer is started here any more. The strip asks for one while a
+        // countdown is actually on screen and lets it go when the last one
+        // leaves; see wantClock. Everything else is driven by events.
         try {
             const usage = await $.session.usage();
             // Read defensively: insisting on one spelling of these fields is
@@ -310,6 +376,11 @@ export function register(on) {
 
     // Follow-ups, asked for once a turn has something to follow.
     on('turn.complete', async ($, e, next) => {
+        // A finished plan is a receipt, and the turn ending is receipt
+        // enough. An unfinished one stays: the work is still outstanding and
+        // the next turn usually picks it up.
+        if (state.plan && state.plan.complete) state.plan = null;
+
         const result = await next(e);
         if (e.agentId || e.isAborted) return result;
 
@@ -377,6 +448,24 @@ export function register(on) {
     // signal that the choice is now yours.
     // Measure a destructive command before agreeing to it. Claude Code
     // already asks; what it cannot say is how big the thing is.
+    // The plan, as it is written and as each item lands.
+    //
+    // No polling and no timer: the todo list only changes when this tool
+    // writes it, so this hook is the whole mechanism. It reads the list and
+    // gets out of the way - it never blocks or alters the call.
+    on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
+        try {
+            const plan = progressOf(todosFrom(e));
+            if (plan) {
+                state.plan = plan;
+                $.ui.invalidate('ui.render');
+            }
+        } catch {
+            // A shape this does not recognise is not worth a broken turn.
+        }
+        return next(e);
+    });
+
     on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
         state.turnToolCalls += 1;
         if (!state.blastOn) return next(e);
@@ -604,40 +693,81 @@ export function register(on) {
         // would draw as 'claude-son'.
         model = shortModel(model);
 
+        // Worked out once and used by both surfaces, so the terminal and the
+        // desktop can never disagree about what matters.
+        const readings = readingsFor({
+            contextPercent: state.contextPercent,
+            rateLimits: state.rateLimits,
+            labelOf: shortKind,
+        });
+        const worst = worstLevel(readings);
+        const lead = leadNote(readings);
+
+        // The one timer in the mod, asked for only while something on screen
+        // counts down by the minute. A reset two days out is drawn as the
+        // time of day it happens, which does not go stale - so most of the
+        // time this costs nothing at all.
+        wantClock($, needsClock(readings));
+
         let strip;
         if (e.surface === 'desktop' && typeof Svg === 'function') {
             // The Desktop app draws vector art, so it gets a real gauge
             // rather than a drawing made of characters. Labels stay as Text,
             // which follows the app's light or dark theme; only the gauges
             // are pictures, and nothing in them assumes a background.
+            // Every reading stays on screen. What changes is how loudly
+            // each is said: a calm window is dim and narrow, one worth
+            // watching takes its colour and its gauge back, and one about to
+            // run dry gets a sentence under the strip. The reader is pointed
+            // somewhere instead of being handed a row to search.
             const row = [];
-            const label = (text) => Text({ key: 'l' + row.length, dimColor: true, children: [text] });
-            const reading = (name, percent) => {
-                row.push(label(name));
-                row.push(Svg({
-                    key: 'g' + name,
-                    alt: gaugeAlt(name, percent),
-                    width: 96,
-                    height: 10,
-                    source: gaugeSvg(percent),
-                }));
-                row.push(Text({ key: 'p' + name, color: tone(percent), children: [percentText(percent)] }));
-            };
 
-            row.push(Text({ key: 'model', color: state.pinned ? 'yellow' : 'cyan', children: [model] }));
+            // The dot is the whole strip in one character: green while
+            // nothing needs you, amber when something does, red when a
+            // window is nearly gone. It is the only thing that has to be
+            // read from across the room.
+            row.push(Text({
+                key: 'dot',
+                color: readingColor(worst),
+                children: ['●'],
+            }));
+            row.push(Text({ key: 'model', color: state.pinned ? 'yellow' : undefined, children: [model] }));
             row.push(Text({
                 key: 'badge',
-                color: state.pinned ? 'yellow' : 'green',
+                dimColor: !state.pinned,
+                color: state.pinned ? 'yellow' : undefined,
                 children: [badgeText(state.pinned, state.routing).trim()],
             }));
-            if (typeof state.contextPercent === 'number') reading('ctx', state.contextPercent);
-            for (const limit of state.rateLimits) {
-                const short = shortKind(limit.kind);
-                if (!short) continue;
-                reading(short, limit.percentUsed);
-                const reset = resetText(limit.resetsAt);
-                if (reset) row.push(label('↻ ' + reset));
+
+            for (const r of readings) {
+                row.push(Text({ key: 'sep' + r.key, dimColor: true, children: ['│'] }));
+                row.push(Text({
+                    key: 'l' + r.key,
+                    dimColor: r.level === CALM,
+                    children: [r.label],
+                }));
+                // A gauge is a picture of how close something is to its
+                // limit. At 2% there is nothing to picture, so a calm
+                // reading spends no pixels on one and says its number.
+                if (r.level !== CALM) {
+                    row.push(Svg({
+                        key: 'g' + r.key,
+                        alt: gaugeAlt(r.label, r.percent),
+                        width: 72,
+                        height: 8,
+                        source: gaugeSvg(r.percent, { width: 72, height: 8, markAt: markFor(r) }),
+                    }));
+                }
+                row.push(Text({
+                    key: 'p' + r.key,
+                    dimColor: r.level === CALM,
+                    color: r.level === CALM ? undefined : tone(r.percent),
+                    children: [percentText(r.percent)],
+                }));
+                const reset = resetFor(r);
+                if (reset) row.push(Text({ key: 'r' + r.key, dimColor: true, children: [reset] }));
             }
+
             strip = Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1, children: row });
         } else {
             // How much room there is, in order of how much it can be
@@ -660,10 +790,65 @@ export function register(on) {
             });
         }
 
+        const rows = [];
+
+        // The plan first, because it is the thing you are actually watching
+        // while a long job runs. It is absent on an ordinary turn.
+        if (worthShowing(state.plan)) {
+            const plan = state.plan;
+            const bar = [];
+            bar.push(Text({ key: 'pg-i', color: 'blue', children: ['▸'] }));
+            if (plan.label) {
+                bar.push(Text({ key: 'pg-n', children: [plan.label] }));
+            }
+            if (e.surface === 'desktop' && typeof Svg === 'function') {
+                bar.push(Svg({
+                    key: 'pg-b',
+                    alt: progressAlt(plan),
+                    width: 180,
+                    height: 8,
+                    source: progressSvg(plan.donePercent, plan.reachedPercent, { width: 180, height: 8 }),
+                }));
+            } else {
+                for (const piece of planBar(plan, opts.ascii)) {
+                    bar.push(Text({
+                        key: 'pg-c' + bar.length,
+                        color: piece.color,
+                        dimColor: !!piece.dim,
+                        children: [piece.text],
+                    }));
+                }
+            }
+            bar.push(Text({ key: 'pg-c', dimColor: true, children: [countText(plan)] }));
+            bar.push(Text({ key: 'pg-p', color: 'blue', children: [percentText(plan.percent)] }));
+            rows.push(Box({
+                key: 'hud-progress',
+                flexDirection: 'row',
+                alignItems: 'center',
+                columnGap: 1,
+                children: bar,
+            }));
+        }
+
+        rows.push(strip);
+
+        // One line, only when a window will actually run out before it
+        // resets. Three stacked warnings are three warnings nobody reads.
+        if (lead) {
+            rows.push(Box({
+                key: 'hud-pace',
+                flexDirection: 'row',
+                columnGap: 1,
+                children: [
+                    Text({ key: 'pc-l', color: tone(lead.percent), children: ['↑'] }),
+                    Text({ key: 'pc-t', children: [lead.label + ' ' + lead.note] }),
+                ],
+            }));
+        }
+
         // The follow-ups, if the last turn produced any. Buttons rather than
         // text, so one press sends it: a suggestion you have to retype is
         // not a suggestion, it is a reminder.
-        const rows = [strip];
 
         // The subagent row, while there is one. No row at all when there
         // is not: a line saying "no agents" is a permanent reminder of
@@ -675,18 +860,21 @@ export function register(on) {
                 Text({ key: 'ag-h', color: 'cyan', children: ['\u27f3 ' + running.length
                     + (running.length === 1 ? ' agent' : ' agents')] }),
             ];
+            const showShare = comparable(running);
             running.forEach((a, i) => {
                 cells.push(Text({ key: 'ag-s' + i, dimColor: true, children: [' \u2502 '] }));
                 cells.push(Text({ key: 'ag-n' + i, color: statusColor(a.status), children: [a.name] }));
-                cells.push(Text({ key: 'ag-g' + i, children: [' '] }));
-                barPieces(portions[i] * 100, 10, opts.ascii).forEach((piece, j) => {
-                    cells.push(Text({
-                        key: 'ag-b' + i + '-' + j,
-                        color: piece.color,
-                        dimColor: !!piece.dim,
-                        children: [piece.text],
-                    }));
-                });
+                if (showShare) {
+                    cells.push(Text({ key: 'ag-g' + i, children: [' '] }));
+                    barPieces(portions[i] * 100, 10, opts.ascii).forEach((piece, j) => {
+                        cells.push(Text({
+                            key: 'ag-b' + i + '-' + j,
+                            color: piece.color,
+                            dimColor: !!piece.dim,
+                            children: [piece.text],
+                        }));
+                    });
+                }
                 cells.push(Text({
                     key: 'ag-t' + i,
                     dimColor: true,

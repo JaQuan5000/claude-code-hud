@@ -139,6 +139,19 @@ export function prune(agents, now = Date.now()) {
 }
 
 /**
+ * Does a share bar say anything here?
+ *
+ * A share needs something to be a share of. One agent is always the whole of
+ * the agent tokens, so its bar is always full - and it is drawn in the same
+ * language as the quota bars, where full means spent. The row read as an
+ * agent that had exhausted something when it only meant it had no company.
+ * From two agents on, the bar shows the split and earns its place.
+ */
+export function comparable(agents) {
+    return (agents || []).length > 1;
+}
+
+/**
  * Each agent's share of the tokens spent across all of them, 0 to 1.
  *
  * With nothing spent yet every share is 0, which draws empty bars rather

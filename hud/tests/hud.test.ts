@@ -15,8 +15,12 @@ import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js
 import { paceOf, paceText, paceMark, FAST_RATIO } from '../hooks/hud-pace.js';
 import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
 import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hooks/hud-suggest.js';
-import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage } from '../hooks/hud-usage.js';
-import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares,
+import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage, hasFableWindow } from '../hooks/hud-usage.js';
+import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
+    CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
+import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN } from '../hooks/hud-progress.js';
+import { planBar } from '../hooks/hud-format.js';
+import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
 import { assess, firstPath, previewFor, countLines, describe, warningFor } from '../hooks/hud-blast.js';
 import { shouldCheck, buildHeadsPrompt, flatten, parseHeadsUp } from '../hooks/hud-heads.js';
@@ -1181,3 +1185,291 @@ test('the gating hook has a catch handler, so a bug in it fails open', async () 
     mod.register(on);
     expect(gatedHasCatch).toBe(true);
 });
+
+// ================================================ the separate Fable window
+//
+// The usage panel on the website shows three allowances: the session, the
+// week, and a weekly one for Fable on its own. Claude Code reports only the
+// first two to mods, so the third cannot be drawn - and the strip going quiet
+// about it looks exactly like the strip being broken.
+//
+// These cover both halves: that nothing is silently dropped when it does
+// arrive, and that its absence is stated rather than hidden.
+
+test('a Fable window is read like any other when it is reported', async () => {
+    const read = readUsage({
+        rateLimits: [
+            { kind: 'five_hour', percentUsed: 22, resetsAt: 1700000000 },
+            { kind: 'seven_day', percentUsed: 67, resetsAt: 1700600000 },
+            { kind: 'seven_day_fable', percentUsed: 4, resetsAt: 1700600000 },
+        ],
+    });
+    expect(read.rateLimits.length).toBe(3);
+    expect(read.rateLimits[2].kind).toBe('seven_day_fable');
+    expect(read.rateLimits[2].percentUsed).toBe(4);
+    // The reset has to survive too, or it draws a bar with no countdown.
+    expect(read.rateLimits[2].resetsAt).toBe(1700600000);
+});
+
+test('and it is labelled Fable, not dropped for being unfamiliar', async () => {
+    // The list of kinds is not documented, so anything unrecognised is
+    // tidied rather than discarded: a limit nobody shows you is how you run
+    // out of something you did not know you had.
+    expect(shortKind('seven_day_fable')).toBe('Fable');
+    expect(shortKind('fable_weekly')).toBe('Fable');
+    expect(shortKind('seven_day_opus')).toBe('Opus');
+});
+
+test('the readout notices when no Fable window came back', async () => {
+    expect(hasFableWindow([{ kind: 'five_hour' }, { kind: 'seven_day' }])).toBe(false);
+    expect(hasFableWindow([{ kind: 'seven_day_fable' }])).toBe(true);
+    expect(hasFableWindow([])).toBe(false);
+});
+
+test('/hud raw says Fable is absent rather than leaving it a mystery', async () => {
+    const lines = describeUsage({
+        context: { tokens: 1, window: 2, percent: 33 },
+        rateLimits: [
+            { kind: 'five_hour', percentUsed: 26, resetsAt: 1700000000 },
+            { kind: 'seven_day', percentUsed: 67, resetsAt: 1700600000 },
+        ],
+    }).join('\n');
+    expect(lines.includes('no Fable window in this data')).toBe(true);
+    // And it names every window, so the answer is visible rather than
+    // inferred from a count.
+    expect(lines.includes('kinds: five_hour, seven_day')).toBe(true);
+});
+
+test('and says nothing about it once it is there', async () => {
+    const lines = describeUsage({
+        rateLimits: [
+            { kind: 'five_hour', percentUsed: 26, resetsAt: 1700000000 },
+            { kind: 'seven_day_fable', percentUsed: 4, resetsAt: 1700600000 },
+        ],
+    }).join('\n');
+    expect(lines.includes('no Fable window in this data')).toBe(false);
+});
+
+// ========================================= the subagent bar means a share
+//
+// It is each agent's portion of the tokens spent across all of them. With one
+// agent that is always the whole thing, so the bar was always full - drawn in
+// the same language as the quota bars above it, where full means spent. The
+// row read as an agent that had maxed something out when it only meant there
+// was nothing to compare it with.
+
+test('one agent is the whole of the agent tokens, by definition', async () => {
+    const one = [{ id: 'a', tokens: 1700000 }];
+    expect(shares(one)[0]).toBe(1);
+});
+
+test('which is why a lone agent is not given a bar', async () => {
+    // The strip's own rule, not a copy of it written here.
+    expect(comparable([{ id: 'a' }])).toBe(false);
+    expect(comparable([{ id: 'a' }, { id: 'b' }])).toBe(true);
+    expect(comparable([])).toBe(false);
+    expect(comparable(undefined)).toBe(false);
+});
+
+test('two agents split it, and the bar starts meaning something', async () => {
+    const two = [{ id: 'a', tokens: 750 }, { id: 'b', tokens: 250 }];
+    const portions = shares(two);
+    expect(portions[0]).toBe(0.75);
+    expect(portions[1]).toBe(0.25);
+});
+
+// ============================================== what the strip makes of it
+//
+// Every reading stays on screen; only the weight changes. These cover the
+// rule that decides that weight, and the one that decides whether the mod
+// needs a timer running at all.
+
+test('a reading earns its weight from the same thresholds as its colour', async () => {
+    expect(levelOf(0)).toBe(CALM);
+    expect(levelOf(55)).toBe(CALM);
+    expect(levelOf(56)).toBe(WATCH);
+    expect(levelOf(85)).toBe(WATCH);
+    expect(levelOf(86)).toBe(URGENT);
+    expect(levelOf(100)).toBe(URGENT);
+});
+
+test('a rounding case lands on the same side as the printed number', async () => {
+    // 55.6 prints as 56, so it must not still be calm.
+    expect(levelOf(55.6)).toBe(WATCH);
+    expect(levelOf(85.7)).toBe(URGENT);
+});
+
+test('the dot reports the worst thing on the strip', async () => {
+    expect(worstLevel([{ level: CALM }, { level: CALM }])).toBe(CALM);
+    expect(worstLevel([{ level: CALM }, { level: WATCH }])).toBe(WATCH);
+    expect(worstLevel([{ level: WATCH }, { level: URGENT }])).toBe(URGENT);
+    expect(worstLevel([])).toBe(CALM);
+});
+
+test('a reset far out is a time of day, one close is a countdown', async () => {
+    const now = 1700000000000;
+    const inMinutes = (m) => (now + m * 60000) / 1000;
+    expect(resetFormFor(inMinutes(30), now)).toBe('countdown');
+    expect(resetFormFor(inMinutes(119), now)).toBe('countdown');
+    expect(resetFormFor(inMinutes(121), now)).toBe('clock');
+    expect(resetFormFor(inMinutes(60 * 40), now)).toBe('clock');
+    expect(resetFormFor(null, now)).toBe('none');
+    // Already gone: nothing to count down to.
+    expect(resetFormFor(inMinutes(-5), now)).toBe('none');
+});
+
+test('the per-minute redraw runs only while something counts down', async () => {
+    // This is the whole saving. The strip used to redraw every minute from
+    // startup to shutdown whether or not anything on it changed.
+    expect(needsClock([{ resetForm: 'clock' }, { resetForm: 'none' }])).toBe(false);
+    expect(needsClock([{ resetForm: 'clock' }, { resetForm: 'countdown' }])).toBe(true);
+    expect(needsClock([])).toBe(false);
+});
+
+test('context is a reading but never a window', async () => {
+    // It has no reset and no pace: it ends when the conversation is
+    // compacted, not when a clock runs out.
+    const readings = readingsFor({ contextPercent: 33, rateLimits: [] });
+    expect(readings.length).toBe(1);
+    expect(readings[0].label).toBe('Ctx');
+    expect(readings[0].resetForm).toBe('none');
+    expect(readings[0].note).toBe('');
+});
+
+test('every window reported is a reading, in the order it came', async () => {
+    const readings = readingsFor({
+        contextPercent: 15,
+        rateLimits: [
+            { kind: 'five_hour', percentUsed: 2, resetsAt: 1700000000 },
+            { kind: 'seven_day', percentUsed: 64, resetsAt: 1700600000 },
+            { kind: 'seven_day_fable', percentUsed: 4, resetsAt: 1700600000 },
+        ],
+        labelOf: shortKind,
+    });
+    expect(readings.map((r) => r.label).join(',')).toBe('Ctx,Session,Week,Fable');
+});
+
+test('a spend limit is still left out, since it is not a quota', async () => {
+    const readings = readingsFor({
+        rateLimits: [{ kind: 'spend_limit', percentUsed: 80 }],
+        labelOf: shortKind,
+    });
+    expect(readings.length).toBe(0);
+});
+
+test('only one note is ever spoken, and it is the most pressing', async () => {
+    const pick = leadNote([
+        { label: 'Week', level: WATCH, note: 'slow', pace: { dryInMinutes: 900 } },
+        { label: 'Session', level: URGENT, note: 'fast', pace: { dryInMinutes: 30 } },
+    ]);
+    expect(pick.label).toBe('Session');
+    expect(leadNote([{ label: 'Week', level: CALM, note: '' }])).toBe(null);
+    expect(leadNote([])).toBe(null);
+});
+
+// ====================================================== the progress bar
+//
+// The denominator comes from the todo list, which is written before the work
+// starts and updated as each item lands. Nothing here is invented.
+
+test('the plan is found whatever the event calls it', async () => {
+    const list = [{ content: 'a', status: 'completed' }];
+    expect(todosFrom({ todos: list }).length).toBe(1);
+    expect(todosFrom({ input: { todos: list } }).length).toBe(1);
+    expect(todosFrom({ args: { todos: list } }).length).toBe(1);
+    expect(todosFrom({ parameters: { items: list } }).length).toBe(1);
+    expect(todosFrom({}).length).toBe(0);
+    expect(todosFrom(null).length).toBe(0);
+});
+
+test('one todo is not a plan', async () => {
+    // A bar reading 0/1 on every small question is noise.
+    expect(progressOf([{ content: 'a', status: 'pending' }])).toBe(null);
+    expect(progressOf([])).toBe(null);
+    expect(MIN_PLAN).toBe(2);
+});
+
+test('finished and in hand are counted apart', async () => {
+    const plan = progressOf([
+        { content: 'one', status: 'completed' },
+        { content: 'two', status: 'completed' },
+        { activeForm: 'Building the sidebar', status: 'in_progress' },
+        { content: 'four', status: 'pending' },
+    ]);
+    expect(plan.total).toBe(4);
+    expect(plan.done).toBe(2);
+    expect(plan.doing).toBe(1);
+    // The bar reaches the end when the work does, not when the last item is
+    // picked up - so the solid layer counts only what is finished.
+    expect(plan.donePercent).toBe(50);
+    expect(plan.reachedPercent).toBe(75);
+    expect(plan.label).toBe('Building the sidebar');
+    expect(countText(plan)).toBe('2/4');
+});
+
+test('the item in hand names the bar', async () => {
+    const plan = progressOf([
+        { content: 'done thing', status: 'completed' },
+        { activeForm: 'Wiring the panel', content: 'Wire the panel', status: 'in_progress' },
+    ]);
+    expect(plan.label).toBe('Wiring the panel');
+});
+
+test('a finished plan stops being drawn', async () => {
+    const done = progressOf([
+        { content: 'one', status: 'completed' },
+        { content: 'two', status: 'completed' },
+    ]);
+    expect(done.complete).toBe(true);
+    expect(worthShowing(done)).toBe(false);
+    expect(worthShowing(null)).toBe(false);
+});
+
+test('a plan still running is drawn', async () => {
+    const plan = progressOf([
+        { content: 'one', status: 'completed' },
+        { content: 'two', status: 'pending' },
+    ]);
+    expect(worthShowing(plan)).toBe(true);
+    expect(plan.percent).toBe(50);
+});
+
+test('an unfamiliar status counts as not started rather than breaking', async () => {
+    const plan = progressOf([
+        { content: 'one', status: 'queued' },
+        { content: 'two', status: 'completed' },
+    ]);
+    expect(plan.done).toBe(1);
+    expect(plan.doing).toBe(0);
+});
+
+test('the terminal bar is blue, two weights, and exactly as wide as asked', async () => {
+    const plan = progressOf([
+        { content: 'a', status: 'completed' },
+        { content: 'b', status: 'in_progress' },
+        { content: 'c', status: 'pending' },
+        { content: 'd', status: 'pending' },
+    ]);
+    const pieces = planBar(plan, false, 16);
+    const text = pieces.map((x) => x.text).join('');
+    expect(text.length).toBe(16);
+    expect(text.startsWith('[')).toBe(true);
+    expect(text.endsWith(']')).toBe(true);
+    // Never the quota colours: progress is not a limit.
+    const colors = pieces.map((x) => x.color).filter(Boolean);
+    expect(colors.every((c) => c === 'blue')).toBe(true);
+});
+
+test('the first item of a long plan still shows as something begun', async () => {
+    const todos = [{ content: 'a', status: 'completed' }];
+    for (let i = 0; i < 19; i += 1) todos.push({ content: 'x' + i, status: 'pending' });
+    const pieces = planBar(progressOf(todos), false, 16);
+    const solid = pieces.find((x) => x.color === 'blue' && !x.dim);
+    expect(!!solid).toBe(true);
+});
+
+test('an empty plan draws an empty track, not a broken bar', async () => {
+    const pieces = planBar(null, false, 16);
+    expect(pieces.map((x) => x.text).join('').length).toBe(16);
+});
+

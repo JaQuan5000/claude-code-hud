@@ -137,9 +137,22 @@ After a turn, the mod offers two or three next steps, each a key press away:
 1: Run the parser tests   2: Add a case for empty input   3: Update the README
 ```
 
-They come from the cheap model reading the turn that just finished, so they are specific to the work rather than stock phrases. This is the one place the mod spends anything: a few hundred tokens of Haiku per turn, with the request capped so a long turn cannot become a long bill. `/hud suggest off` stops it entirely, and nothing else in the mod calls a model.
+They come from the cheap model reading the turn that just finished, so they are specific to the work rather than stock phrases: a few hundred tokens of Haiku per turn, with the request capped so a long turn cannot become a long bill. `/hud suggest off` stops it entirely.
 
-It sends a trimmed slice of the prompt and the answer - the same conversation Claude already has, to the same place it already goes. Nothing is stored, nothing is written to disk, and nothing reaches any third party. With suggestions off, the mod makes no requests at all.
+It sends a trimmed slice of the prompt and the answer - the same conversation Claude already has, to the same place it already goes. Nothing is stored, nothing is written to disk, and nothing reaches any third party.
+
+## What the mod sends, in full
+
+Two features make their own model requests, and both are **on by default**. Everything else in the mod is arithmetic on numbers Claude Code already has, and makes no requests at all.
+
+| Feature | When it fires | What it sends | Turn it off |
+|---|---|---|---|
+| Follow-up suggestions | After a turn that produced an answer | A trimmed slice of your prompt and the answer | `/hud suggest off` |
+| Heads-up | At most every few turns, and only after a substantial turn | The last ~2,400 characters of the conversation | `/hud know off` |
+
+Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing is written to disk, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
+
+If you would rather it never spoke to a model without being asked, put `/hud suggest off` and `/hud know off` in your first session; the setting sticks.
 
 ## Tuning the routing on real data
 

@@ -82,3 +82,53 @@ export function gaugeSvg(percent, opts = {}) {
 export function gaugeAlt(label, percent) {
     return label + ' ' + Math.round(percent) + ' percent used';
 }
+
+/** The plan's blue. One hue, two weights: finished, and in hand. */
+const PLAN = '#4a8fe0';
+
+/**
+ * The progress bar, as an SVG document.
+ *
+ * Two layers over one track. The faint one reaches as far as the work that
+ * has been picked up; the solid one reaches as far as the work that is
+ * finished. The gap between them is what is happening right now, which is
+ * the one part of a long job you cannot otherwise see.
+ *
+ * Blue, not the green-amber-red of the quota gauges, and deliberately: those
+ * colours mean "how close to a limit", and progress is not a limit. A job
+ * at 90% is nearly done, not nearly in trouble.
+ */
+export function progressSvg(donePercent, reachedPercent, opts = {}) {
+    const w = opts.width || 180;
+    const h = opts.height || 8;
+    const r = h / 2;
+    const clamp = (n) => Math.max(0, Math.min(100, Number(n) || 0));
+    const done = clamp(donePercent);
+    const reached = Math.max(done, clamp(reachedPercent));
+
+    // A sliver still has to look like a rounded end rather than a dot.
+    const widthOf = (pct) => (pct > 0 ? Math.max(h, (pct / 100) * w) : 0);
+    const doneW = widthOf(done);
+    const reachedW = widthOf(reached);
+
+    const parts = [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">',
+        '<rect x="0" y="0" width="' + w + '" height="' + h + '" rx="' + r + '" fill="' + TRACK + '" fill-opacity="0.22"/>',
+    ];
+    if (reachedW > 0) {
+        parts.push('<rect x="0" y="0" width="' + reachedW.toFixed(2) + '" height="' + h
+            + '" rx="' + r + '" fill="' + PLAN + '" fill-opacity="0.38"/>');
+    }
+    if (doneW > 0) {
+        parts.push('<rect x="0" y="0" width="' + doneW.toFixed(2) + '" height="' + h
+            + '" rx="' + r + '" fill="' + PLAN + '"/>');
+    }
+    parts.push('</svg>');
+    return parts.join('');
+}
+
+/** What a screen reader is told, since the picture carries the count. */
+export function progressAlt(plan) {
+    if (!plan) return 'progress';
+    return 'Step ' + plan.done + ' of ' + plan.total + ', ' + Math.round(plan.percent) + ' percent done';
+}

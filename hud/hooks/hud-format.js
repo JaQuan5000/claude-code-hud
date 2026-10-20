@@ -360,3 +360,38 @@ export function layout(state, columns, opts = {}) {
     const smallest = steps[steps.length - 1];
     return fit(buildGroups(state, { ...opts, barCells: smallest }), room, opts.ascii);
 }
+
+/**
+ * The plan's bar in characters, for the terminal.
+ *
+ * The same two layers the desktop draws, in the only two weights a terminal
+ * has: solid blocks for work finished, a lighter shade for work in hand, and
+ * the track for what has not been started. Blue throughout, because progress
+ * is not a limit - a job at 90% is nearly done, not nearly in trouble, and
+ * the green-amber-red of the quota bars would say the opposite.
+ */
+export function planBar(plan, ascii = false, cells = 16) {
+    const inner = Math.max(1, cells - 2);
+    const clamp = (n) => Math.max(0, Math.min(100, Number(n) || 0));
+    const done = clamp(plan && plan.donePercent);
+    const reached = Math.max(done, clamp(plan && plan.reachedPercent));
+
+    // Anything begun shows at least one cell, or a long plan's first item
+    // looks like nothing happening at all.
+    const cellsFor = (pct) => (pct > 0 ? Math.max(1, Math.round((pct / 100) * inner)) : 0);
+    const doneCells = Math.min(inner, cellsFor(done));
+    const reachedCells = Math.min(inner, Math.max(doneCells, cellsFor(reached)));
+
+    const block = ascii ? '#' : '█';
+    const partial = ascii ? '=' : '▒';
+    const dot = ascii ? '.' : '·';
+
+    const pieces = [{ text: '[', dim: true }];
+    if (doneCells) pieces.push({ text: block.repeat(doneCells), color: 'blue' });
+    if (reachedCells > doneCells) {
+        pieces.push({ text: partial.repeat(reachedCells - doneCells), color: 'blue', dim: true });
+    }
+    if (reachedCells < inner) pieces.push({ text: dot.repeat(inner - reachedCells), dim: true });
+    pieces.push({ text: ']', dim: true });
+    return pieces;
+}

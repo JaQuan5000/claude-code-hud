@@ -154,6 +154,19 @@ export function readUsage(usage) {
 }
 
 /**
+ * Is one of these windows the separate allowance for Fable?
+ *
+ * Matched on the name containing "fable" rather than on an exact kind,
+ * because the exact kind is not documented anywhere and the one thing that
+ * can be relied on is that it says so. Used only to tell "not reported"
+ * apart from "reported and dropped", which is the difference between a
+ * missing feature and a bug.
+ */
+export function hasFableWindow(limits) {
+    return (limits || []).some((l) => String((l && l.kind) || '').toLowerCase().includes('fable'));
+}
+
+/**
  * The shape of what came back, for `/hud raw`.
  *
  * Names and types only, never the numbers themselves beyond the two the
@@ -173,12 +186,21 @@ export function describeUsage(usage) {
 
     const raw = usage.rateLimits || usage.rate_limits || usage.limits;
     if (Array.isArray(raw) && raw.length) {
-        lines.push('  limits: ' + raw.length + ', first one has: ' + Object.keys(raw[0] || {}).join(', '));
+        lines.push('  limits: ' + raw.length + ', fields: ' + Object.keys(raw[0] || {}).join(', '));
+        lines.push('  kinds: ' + raw.map((l) => String((l && (l.kind || l.type || l.name || l.window)) || '?')).join(', '));
     } else {
         lines.push('  limits: none reported');
     }
 
     const read = readUsage(usage);
+    if (!hasFableWindow(read.rateLimits)) {
+        lines.push('');
+        lines.push('no Fable window in this data. The usage panel on the website shows a');
+        lines.push('separate weekly allowance for Fable; Claude Code does not report it to');
+        lines.push('mods yet, so the strip cannot show it. Nothing here is broken - the');
+        lines.push('moment it appears in the list above it is drawn like the others.');
+        lines.push('');
+    }
     lines.push('read as: context '
         + (read.contextPercent === null ? 'not found' : Math.round(read.contextPercent) + '%')
         + ', ' + read.rateLimits.length + ' window(s)');
