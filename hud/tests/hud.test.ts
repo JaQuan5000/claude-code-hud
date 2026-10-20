@@ -1108,3 +1108,76 @@ test('an empty or absent target produces no preview at all', async () => {
     expect(assess('rm -rf   ')).toBe(null);
     expect(assess('rm -rf -v')).toBe(null);
 });
+
+// ================================================= the mod actually loads
+//
+// This is the test that was missing, and its absence shipped a mod that
+// could not load at all: a duplicate import made `register.js` throw on
+// import, which looks exactly like the plugin not being installed. Every
+// other test here checks a part; this one checks that the thing starts.
+
+test('the hooks module loads and registers its hooks', async () => {
+    const registered = [];
+
+    const on = (event, a, b) => {
+        const matcher = typeof a === 'function' ? null : a;
+        const handler = typeof a === 'function' ? a : b;
+        expect(typeof event).toBe('string');
+        expect(typeof handler).toBe('function');
+        registered.push({ event, matcher });
+        // The real `on` returns a registration carrying `.catch`.
+        return { catch: () => undefined };
+    };
+
+    const mod = await import('../hooks/register.js');
+    expect(typeof mod.register).toBe('function');
+    mod.register(on);
+
+    // Every hook the mod needs, by name.
+    const events = registered.map((r) => r.event);
+    for (const needed of ['session.start', 'session.measure', 'prompt.submit', 'turn.complete',
+        'turn.step', 'agent.spawn', 'tool.call', 'classic.PreModelSwitch',
+        'command.run', 'ui.render']) {
+        expect(events.indexOf(needed) >= 0).toBe(true);
+    }
+});
+
+test('no event is registered twice without a matcher', async () => {
+    // Claude Code refuses to load a module that does, and the failure is
+    // the whole mod rather than the one hook.
+    const bare = [];
+
+    const on = (event, a) => {
+        if (typeof a === 'function') bare.push(event);
+        return { catch: () => undefined };
+    };
+
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+
+    const seen = new Set();
+    for (const event of bare) {
+        expect(seen.has(event)).toBe(false);
+        seen.add(event);
+    }
+});
+
+test('the gating hook has a catch handler, so a bug in it fails open', async () => {
+    // A tool.call hook that throws without one would leave Claude Code to
+    // decide, and a guard that breaks your work is worse than no guard.
+    let gatedHasCatch = false;
+
+    const on = (event, a, b) => {
+        const isGate = event === 'tool.call';
+        return {
+            catch: (fn) => {
+                if (isGate && typeof fn === 'function') gatedHasCatch = true;
+                return undefined;
+            },
+        };
+    };
+
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+    expect(gatedHasCatch).toBe(true);
+});
