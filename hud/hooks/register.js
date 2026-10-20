@@ -464,6 +464,10 @@ export function register(on) {
             // A shape this does not recognise is not worth a broken turn.
         }
         return next(e);
+    }).catch(async ($, e, next) => {
+        // Fails open, like the Bash hook: reading the plan is decoration,
+        // and decoration must never be the reason a tool call fails.
+        return next(e);
     });
 
     on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -718,57 +722,108 @@ export function register(on) {
             // Every reading stays on screen. What changes is how loudly
             // each is said: a calm window is dim and narrow, one worth
             // watching takes its colour and its gauge back, and one about to
-            // run dry gets a sentence under the strip. The reader is pointed
-            // somewhere instead of being handed a row to search.
-            const row = [];
+            // run dry gets a sentence under the strip.
+            //
+            // **Laid out in groups that never break.** This used to be one
+            // flat row of loose pieces, so when the band was narrow every
+            // piece shrank on its own and split mid-label: "opus 5" on two
+            // lines, "6:30 AM" cut at the space. Each reading is now one
+            // Box that refuses to shrink, holding its own label, gauge,
+            // number and reset, and the row wraps *between* groups. Narrow
+            // means a second line of whole readings, never a torn one.
+            //
+            // The terminal path below is untouched. `size`, `weight`,
+            // `mono` and `tabular` are drawn by the desktop and ignored by
+            // the terminal, which is why they are safe to use here and
+            // nowhere else.
+            const group = (key, children) => Box({
+                key,
+                flexDirection: 'row',
+                alignItems: 'center',
+                flexShrink: 0,
+                columnGap: 1,
+                children,
+            });
 
-            // The dot is the whole strip in one character: green while
-            // nothing needs you, amber when something does, red when a
-            // window is nearly gone. It is the only thing that has to be
-            // read from across the room.
-            row.push(Text({
-                key: 'dot',
-                color: readingColor(worst),
-                children: ['●'],
-            }));
-            row.push(Text({ key: 'model', color: state.pinned ? 'yellow' : undefined, children: [model] }));
-            row.push(Text({
-                key: 'badge',
-                dimColor: !state.pinned,
-                color: state.pinned ? 'yellow' : undefined,
-                children: [badgeText(state.pinned, state.routing).trim()],
-            }));
+            const groups = [];
+
+            // The dot is the whole strip in one glyph: green while nothing
+            // needs you, amber when something does, red when a window is
+            // nearly gone. It leads the model so the first thing the eye
+            // lands on is the verdict.
+            groups.push(group('id', [
+                Text({ key: 'dot', color: readingColor(worst), wrap: 'truncate', children: ['●'] }),
+                Text({
+                    key: 'model',
+                    weight: 'semibold',
+                    color: state.pinned ? 'yellow' : undefined,
+                    wrap: 'truncate',
+                    children: [model],
+                }),
+                Text({
+                    key: 'badge',
+                    size: 'caption',
+                    dimColor: !state.pinned,
+                    color: state.pinned ? 'yellow' : undefined,
+                    wrap: 'truncate',
+                    children: [badgeText(state.pinned, state.routing).trim()],
+                }),
+            ]));
 
             for (const r of readings) {
-                row.push(Text({ key: 'sep' + r.key, dimColor: true, children: ['│'] }));
-                row.push(Text({
-                    key: 'l' + r.key,
-                    dimColor: r.level === CALM,
-                    children: [r.label],
-                }));
+                const parts = [
+                    Text({
+                        key: 'l' + r.key,
+                        size: 'caption',
+                        dimColor: r.level === CALM,
+                        wrap: 'truncate',
+                        children: [r.label],
+                    }),
+                ];
                 // A gauge is a picture of how close something is to its
                 // limit. At 2% there is nothing to picture, so a calm
                 // reading spends no pixels on one and says its number.
                 if (r.level !== CALM) {
-                    row.push(Svg({
+                    parts.push(Svg({
                         key: 'g' + r.key,
                         alt: gaugeAlt(r.label, r.percent),
-                        width: 72,
+                        width: 64,
                         height: 8,
-                        source: gaugeSvg(r.percent, { width: 72, height: 8, markAt: markFor(r) }),
+                        source: gaugeSvg(r.percent, { width: 64, height: 8, markAt: markFor(r) }),
                     }));
                 }
-                row.push(Text({
+                parts.push(Text({
                     key: 'p' + r.key,
+                    weight: 'medium',
+                    tabular: true,
                     dimColor: r.level === CALM,
                     color: r.level === CALM ? undefined : tone(r.percent),
+                    wrap: 'truncate',
                     children: [percentText(r.percent)],
                 }));
                 const reset = resetFor(r);
-                if (reset) row.push(Text({ key: 'r' + r.key, dimColor: true, children: [reset] }));
+                if (reset) {
+                    parts.push(Text({
+                        key: 'r' + r.key,
+                        size: 'caption',
+                        dimColor: true,
+                        wrap: 'truncate',
+                        children: [reset],
+                    }));
+                }
+                groups.push(group('rd' + r.key, parts));
             }
 
-            strip = Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1, children: row });
+            // Wraps between groups, with a little air above a second line so
+            // two rows read as two rows and not as one crowded one.
+            strip = Box({
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                columnGap: 3,
+                rowGap: 'xs',
+                children: groups,
+            });
         } else {
             // How much room there is, in order of how much it can be
             // trusted. The band reports its own width; before the app has
@@ -797,10 +852,6 @@ export function register(on) {
         if (worthShowing(state.plan)) {
             const plan = state.plan;
             const bar = [];
-            bar.push(Text({ key: 'pg-i', color: 'blue', children: ['▸'] }));
-            if (plan.label) {
-                bar.push(Text({ key: 'pg-n', children: [plan.label] }));
-            }
             if (e.surface === 'desktop' && typeof Svg === 'function') {
                 bar.push(Svg({
                     key: 'pg-b',
@@ -819,14 +870,43 @@ export function register(on) {
                     }));
                 }
             }
-            bar.push(Text({ key: 'pg-c', dimColor: true, children: [countText(plan)] }));
-            bar.push(Text({ key: 'pg-p', color: 'blue', children: [percentText(plan.percent)] }));
+            bar.push(Text({ key: 'pg-c', dimColor: true, tabular: true, wrap: 'truncate', children: [countText(plan)] }));
+            bar.push(Text({ key: 'pg-p', color: 'blue', weight: 'medium', tabular: true, wrap: 'truncate', children: [percentText(plan.percent)] }));
+
+            // The task's name is the one thing here allowed to give way. It
+            // can be as long as a sentence, so it truncates with an ellipsis
+            // when the band is narrow, while the bar, the count and the
+            // percentage stay together as a block that never shrinks - a
+            // progress bar torn across two lines says nothing.
             rows.push(Box({
                 key: 'hud-progress',
                 flexDirection: 'row',
                 alignItems: 'center',
-                columnGap: 1,
-                children: bar,
+                columnGap: 2,
+                children: [
+                    Box({
+                        key: 'pg-head',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        columnGap: 1,
+                        flexShrink: 1,
+                        minWidth: 0,
+                        children: [
+                            Text({ key: 'pg-i', color: 'blue', children: ['▸'] }),
+                            ...(plan.label
+                                ? [Text({ key: 'pg-n', wrap: 'truncate-end', children: [plan.label] })]
+                                : []),
+                        ],
+                    }),
+                    Box({
+                        key: 'pg-tail',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        columnGap: 1,
+                        flexShrink: 0,
+                        children: bar,
+                    }),
+                ],
             }));
         }
 
@@ -861,13 +941,21 @@ export function register(on) {
                     + (running.length === 1 ? ' agent' : ' agents')] }),
             ];
             const showShare = comparable(running);
+            // One Box per agent that refuses to shrink, and a row that wraps
+            // between them. Loose pieces in a single row tore apart when the
+            // band was narrow; this way a crowded row becomes two rows of
+            // whole agents. Where everything fits - the terminal, nearly
+            // always - it draws exactly as it did.
+            const agentGroups = [cells[0]];
             running.forEach((a, i) => {
-                cells.push(Text({ key: 'ag-s' + i, dimColor: true, children: [' \u2502 '] }));
-                cells.push(Text({ key: 'ag-n' + i, color: statusColor(a.status), children: [a.name] }));
+                const parts = [
+                    Text({ key: 'ag-s' + i, dimColor: true, children: [' \u2502 '] }),
+                    Text({ key: 'ag-n' + i, color: statusColor(a.status), wrap: 'truncate', children: [a.name] }),
+                ];
                 if (showShare) {
-                    cells.push(Text({ key: 'ag-g' + i, children: [' '] }));
+                    parts.push(Text({ key: 'ag-g' + i, children: [' '] }));
                     barPieces(portions[i] * 100, 10, opts.ascii).forEach((piece, j) => {
-                        cells.push(Text({
+                        parts.push(Text({
                             key: 'ag-b' + i + '-' + j,
                             color: piece.color,
                             dimColor: !!piece.dim,
@@ -875,13 +963,26 @@ export function register(on) {
                         }));
                     });
                 }
-                cells.push(Text({
+                parts.push(Text({
                     key: 'ag-t' + i,
                     dimColor: true,
+                    tabular: true,
+                    wrap: 'truncate',
                     children: [' ' + elapsedText(a.startedAt) + ' ' + tokenText(a.tokens)],
                 }));
+                agentGroups.push(Box({
+                    key: 'ag-grp' + i,
+                    flexDirection: 'row',
+                    flexShrink: 0,
+                    children: parts,
+                }));
             });
-            rows.push(Box({ key: 'hud-agents', flexDirection: 'row', children: cells }));
+            rows.push(Box({
+                key: 'hud-agents',
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                children: agentGroups,
+            }));
         }
 
         // One thing you may have missed, until you dismiss it.

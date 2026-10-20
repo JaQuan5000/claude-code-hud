@@ -1473,3 +1473,102 @@ test('an empty plan draws an empty track, not a broken bar', async () => {
     expect(pieces.map((x) => x.text).join('').length).toBe(16);
 });
 
+// ====================================== the desktop strip holds its shape
+//
+// This shipped as one flat row of loose pieces. In a narrow band every piece
+// shrank on its own and split mid-label: "opus 5" on two lines, "6:30 AM"
+// cut at its space. The fix is structural - a Box per reading that refuses to
+// shrink, in a row that wraps between them - so the test is on the tree, not
+// on any one width: render the real hook and look at what it built.
+
+async function renderDesktopStrip(rateLimits, contextPercent) {
+    const hooks = [];
+    const on = (event, a, b) => {
+        const matcher = typeof a === 'function' ? null : a;
+        const handler = typeof a === 'function' ? a : b;
+        hooks.push({ event, matcher, handler });
+        return { catch: () => undefined };
+    };
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+
+    const el = (type) => (props) => ({ type, ...props });
+    const ui = {
+        resolve: () => ({ Box: el('Box'), Text: el('Text'), Svg: el('Svg'), Button: el('Button') }),
+        invalidate: () => undefined,
+    };
+    const next = async (e) => e;
+
+    const measure = hooks.find((h) => h.event === 'session.measure');
+    await measure.handler({
+        session: { usage: async () => ({ context: { percent: contextPercent }, rateLimits }) },
+        ui,
+    }, {}, next);
+
+    const render = hooks.find((h) => h.event === 'ui.render');
+    return render.handler({
+        ui,
+        session: { model: async () => 'claude-opus-5-5' },
+        clock: { after: () => undefined, every: () => undefined },
+    }, { surface: 'desktop', component: 'AbovePrompt' }, async () => null);
+}
+
+const soon = () => Math.floor(Date.now() / 1000) + 3 * 3600;
+const later = () => Math.floor(Date.now() / 1000) + 40 * 3600;
+
+test('the desktop strip wraps between readings instead of inside them', async () => {
+    const tree = await renderDesktopStrip([
+        { kind: 'five_hour', percentUsed: 58, resetsAt: soon() },
+        { kind: 'seven_day', percentUsed: 71, resetsAt: later() },
+    ], 71);
+    expect(tree.type).toBe('Box');
+    expect(tree.flexWrap).toBe('wrap');
+});
+
+test('and the desktop strip never tears a reading', async () => {
+    const tree = await renderDesktopStrip([
+        { kind: 'five_hour', percentUsed: 58, resetsAt: soon() },
+        { kind: 'seven_day', percentUsed: 71, resetsAt: later() },
+    ], 71);
+    // Every child of the wrapping row is a whole group, and none may shrink.
+    // A bare Text here is the old bug: a loose piece free to split.
+    expect(tree.children.length >= 4).toBe(true);
+    for (const child of tree.children) {
+        expect(child.type).toBe('Box');
+        expect(child.flexShrink).toBe(0);
+    }
+});
+
+test('a reading keeps its label, number and reset together in one group', async () => {
+    const tree = await renderDesktopStrip([
+        { kind: 'five_hour', percentUsed: 58, resetsAt: soon() },
+    ], 10);
+    const session = tree.children.find((c) => c.key === 'rdsession');
+    expect(!!session).toBe(true);
+    const kinds = session.children.map((c) => c.key);
+    expect(kinds.indexOf('lsession') >= 0).toBe(true);
+    expect(kinds.indexOf('psession') >= 0).toBe(true);
+    expect(kinds.indexOf('rsession') >= 0).toBe(true);
+});
+
+test('no text on the desktop strip is left free to wrap mid-word', async () => {
+    const tree = await renderDesktopStrip([
+        { kind: 'five_hour', percentUsed: 58, resetsAt: soon() },
+        { kind: 'seven_day', percentUsed: 71, resetsAt: later() },
+    ], 71);
+    for (const group of tree.children) {
+        for (const part of group.children) {
+            if (part.type === 'Text') expect(part.wrap).toBe('truncate');
+        }
+    }
+});
+
+test('a calm reading spends no gauge and a busy one does', async () => {
+    const tree = await renderDesktopStrip([
+        { kind: 'five_hour', percentUsed: 2, resetsAt: soon() },
+        { kind: 'seven_day', percentUsed: 71, resetsAt: later() },
+    ], 10);
+    const has = (key) => tree.children.find((c) => c.key === key).children.some((p) => p.type === 'Svg');
+    expect(has('rdsession')).toBe(false);
+    expect(has('rdweek')).toBe(true);
+});
