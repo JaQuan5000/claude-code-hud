@@ -6,6 +6,8 @@ A **Claude Code mod** that cuts what a session costs and shows you where you sta
 - **Shows where you stand, above the prompt.** Which model is in play, how full the context is, and each rate-limit window with how long until it resets.
 - **Warns you before you run dry.** It knows when each window resets, so it can tell whether 91% used is fine or a problem, and say how long you have at the rate you are going.
 - **Offers what to do next.** After a turn, two or three follow-ups you can send with one key.
+- **Shows what the subagents are doing**, while there are any, and nothing at all when there are not.
+- **Measures a destructive command before it runs.** `rm -rf build` tells you it is 1,240 files first.
 
 ```
 sonnet 5.5 auto │ Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
@@ -151,6 +153,58 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 
 `/hud tune` reads those same records back and says what they imply - a tier that never fires has patterns too narrow, a tier that catches everything has patterns too broad - and lists the words that keep turning up in middle-tier prompts, so you can promote the ones that mean something. It only suggests a word it has seen in more than one prompt, because a rule built from a single sample is a rule that overfits to whatever you did last.
 
+## Watching the subagents
+
+A subagent works out of sight: you see a spinner, then an answer some minutes later. Three of them run at once and you cannot tell which is stuck, which is spending your quota, or how long this has been going on. While any are alive, a row appears under the strip:
+
+```
+⟳ 2 agents │ explore [████▌···]  18s 4.1k │ review [██······]   5s 1.2k
+```
+
+When they finish it lingers a few seconds, then disappears completely. There is no row saying "no agents", and no timer running to draw one: the poll only reschedules itself while something is alive, so a session without subagents costs nothing at all.
+
+**The bar is not progress, and does not pretend to be.** A progress bar needs a denominator and nothing knows how much work a subagent has left. Each bar is that agent's **share of the tokens spent across all of them** - a real number, answering the question you actually have: which of these is doing the heavy lifting. `/hud agents` lists every subagent the session has run, finished ones included.
+
+## Measuring a destructive command
+
+Claude Code already asks before `rm -rf`. What it cannot tell you is the size of what you are agreeing to - `rm -rf build` and `rm -rf .` look alike in a prompt and differ by your afternoon. This finds the shape of the command, measures it with a read-only counterpart, and puts a number in front of you:
+
+> This deletes 1,240 files under build.
+> `rm -rf build`
+> **Run it** / **Cancel**
+
+It recognises `rm -rf`, `git reset --hard`, `git clean -f`, force pushes, `DROP TABLE` and raw device writes. It measures with `find`, `git status --porcelain`, `git clean -nd` (git's own dry run) and `git log @{u}..HEAD`.
+
+Three things it deliberately does not do:
+
+- **It does not flag `--force-with-lease`.** That is the safe form, and interrupting it would train you to dismiss the box without reading it.
+- **It does not guess at a command that builds its own arguments.** `rm -rf $(cat list)` is unreadable statically, so it says nothing rather than measure the wrong thing.
+- **It does not fail closed.** If the measurement errors, the command carries on to Claude Code's usual permission prompt. A guard that blocks your work when it has a bug is worse than no guard.
+
+`/hud blast off` turns it off.
+
+### Why this one needs `$.process.run`
+
+Measuring means running something, which is the only capability in this mod that can start a process. Three constraints make that safe, and they are the design rather than decoration:
+
+- Every preview is built as an **argv array, never a shell string**, so a path cannot close a quote, open a subshell or chain a second command - whatever it contains.
+- The verb and flags are **fixed by which pattern matched**. Nothing executable is ever taken from the command text; only the target travels, as one array element.
+- It runs **only after a destructive pattern has already matched**, with a ten second timeout.
+
+If you would rather the mod could not start processes at all, `/hud blast off` and nothing here ever runs.
+
+## One thing you may have missed
+
+After a substantial turn, Haiku rereads the recent conversation and looks for a single thing worth raising:
+
+```
+✦ Heads up · You changed the retry logic but the test still asserts the old timeout.   0: dismiss
+```
+
+Claude Code has this built in as `cc-plugin-you-should-know`, and the built-in is better: it reads your whole context with your session model. It also bills several thousand tokens of instructions plus a reply on **every** check, repeatedly, during exactly the long tasks where it fires most. In a mod whose purpose is to spend less, that is the wrong shape, so this is the cheap version and it is honest about the trade: it will catch less.
+
+It only looks at turns big enough to hide a mistake in - several tool calls, or a long answer - and never more often than every third turn. It is asked for silence by default, and anything that comes back which is not a short concrete note is discarded unseen. `/hud know off` stops it, and then nothing calls a model on your behalf except the follow-ups.
+
 ## Commands
 
 | Command | What it does |
@@ -162,6 +216,9 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 | `/hud log` | What was routed where, and which words decided it |
 | `/hud tune` | What the log says about your patterns |
 | `/hud suggest on` / `off` | Follow-up suggestions under the strip |
+| `/hud agents` | Every subagent this session has run, with status and spend |
+| `/hud know on` / `off` | The heads-up check after a big turn |
+| `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
 
@@ -223,11 +280,13 @@ The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and 
 Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses five calls:
 
 ```
-$.clock.every   $.command.register   $.model.complete   $.prompt.submit
-$.session.model   $.session.usage   $.ui.ask   $.ui.invalidate   $.ui.resolve
+$.agent.list      $.clock.after       $.clock.every     $.command.register
+$.model.complete  $.process.run       $.prompt.submit   $.session.messages
+$.session.model   $.session.usage     $.ui.ask          $.ui.invalidate
+$.ui.resolve
 ```
 
-No filesystem, no network, no subprocesses, no environment variables, no MCP. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
+No filesystem, no environment variables, no storage, no MCP. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
 
 ## What it does not do
 

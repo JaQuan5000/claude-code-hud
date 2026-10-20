@@ -14,13 +14,17 @@
  * that overrode your own `/model` on the next message would be intolerable.
  */
 
-import { layout, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
+import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
 import { gaugeSvg, gaugeAlt } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
 import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
 import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
 import { readUsage, describeUsage } from './hud-usage.js';
+import { spawned, addTokens, tokensOf, merge, visible, prune, shares,
+    elapsedText, tokenText, statusColor, isAlive } from './hud-agents.js';
+import { assess, previewFor, countLines, describe, warningFor } from './hud-blast.js';
+import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 
 /**
  * What the strip draws from.
@@ -49,6 +53,16 @@ const state = {
     suggestOn: true,
     /** The last usage() reply, for `/hud raw`. */
     lastUsage: null,
+    /** Subagents this session has seen, and whether a poll is running. */
+    agents: [],
+    agentTimer: false,
+    /** The current heads-up note, and what decides when to look for one. */
+    headsNote: null,
+    headsOn: true,
+    headsSinceLast: 0,
+    turnToolCalls: 0,
+    /** Whether a destructive command is measured before it runs. */
+    blastOn: true,
 };
 
 /**
@@ -113,8 +127,208 @@ const DEFAULTS = {
 const TIER_KEYS = { fast: 'fastModel', base: 'baseModel', deep: 'deepModel', top: 'topModel' };
 const NEWEST_OPUS = 'claude-opus-5-5';
 
+/**
+ * Keep the subagent row live, and stop entirely when nothing is running.
+ *
+ * A fixed timer would tick for the whole session to show a row that is
+ * almost never there. This reschedules itself only while an agent is
+ * alive, so a session with no subagents runs no timer at all.
+ */
+/**
+ * Look for one thing the last turn may have hidden.
+ *
+ * Declared at the top level so it can be handed the mods API: a helper
+ * defined inside a hook cannot take `/**
+ * hud: route each request to the cheapest capable model, and say so.
+ *
+ * Two halves that share one piece of state.
+ *
+ * The readout draws above the prompt: which model is in play, how full the
+ * context is, and how much of each rate-limit window is gone. All of it comes
+ * from `$.session.usage()`, which Claude Code already knows, so nothing is
+ * polled and nothing is counted by hand.
+ *
+ * The routing reads each prompt, decides whether it is small work, everyday
+ * work or a planning job, and sends that turn's requests to the matching
+ * model. It stands down the moment you choose a model yourself, because a mod
+ * that overrode your own `/model` on the next message would be intolerable.
+ */
+
+import { layout, tone, percentText, badgeText, shortKind, resetText } from './hud-format.js';
+import { gaugeSvg, gaugeAlt } from './hud-svg.js';
+import { MODELS, shortModel, resolveModel } from './hud-models.js';
+import { classify, chooseModel } from './hud-route.js';
+import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
+import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
+import { readUsage, describeUsage } from './hud-usage.js';
+import { spawned, addTokens, tokensOf, merge, visible, prune, shares,
+    elapsedText, tokenText, statusColor, isAlive } from './hud-agents.js';
+import { assess, previewFor, countLines, describe, warningFor } from './hud-blast.js';
+import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
+
+/**
+ * What the strip draws from.
+ *
+ * Module scope, so it resets when the module reloads. That is the right
+ * lifetime: every value here is either about this session or is re-read from
+ * Claude Code within a turn.
+ */
+const state = {
+    /** True once you have picked a model by hand. Routing then leaves it alone. */
+    pinned: false,
+    /** Whether routing is on at all, from the setting and the /hud command. */
+    routing: true,
+    /** The model routing picked for the current turn, or null before the first prompt. */
+    chosen: null,
+    /** Why it picked that, for /hud to explain. */
+    reason: '',
+    /** True when a planning job was held back to spare the five-hour window. */
+    held: false,
+    contextPercent: null,
+    rateLimits: [],
+    /** The last few routing decisions, for `/hud log` and `/hud tune`. */
+    log: [],
+    /** Follow-ups offered under the strip, and whether to ask for them. */
+    suggestions: [],
+    suggestOn: true,
+    /** The last usage() reply, for `/hud raw`. */
+    lastUsage: null,
+    /** Subagents this session has seen, and whether a poll is running. */
+    agents: [],
+    agentTimer: false,
+    /** The current heads-up note, and what decides when to look for one. */
+    headsNote: null,
+    headsOn: true,
+    headsSinceLast: 0,
+    turnToolCalls: 0,
+    /** Whether a destructive command is measured before it runs. */
+    blastOn: true,
+};
+
+/**
+ * Past this much of the five-hour window, an expensive turn asks first.
+ *
+ * The holdback is off by default, which is the right call: the tier a
+ * prompt earns is the tier it gets. The failure mode that leaves is
+ * spending the last of a window on something you would happily have run
+ * cheaper, so instead of refusing, it asks - and only when the window is
+ * nearly gone and the prompt earned an expensive tier, which is rare
+ * enough not to nag.
+ */
+const CONFIRM_ABOVE = 85;
+
+/**
+ * Everything the mod can be told, in one place.
+ *
+ * These were nine `userConfig` fields, which Claude Code prompts for when a
+ * plugin is enabled: installing the mod ended in a notice that nine settings
+ * were not filled in and a suggestion to run `/plugin configure`. The mod
+ * worked regardless - the defaults were passed in - but a readout you have
+ * to configure before it will read anything is a bad trade for options most
+ * people will never change. They are constants now, the install is silent,
+ * and the only ones worth changing mid-session have `/hud` commands.
+ *
+ * Edit here to retune.
+ *
+ * **These must be full model ids, not the aliases.** `haiku`, `sonnet`,
+ * `opus` and `fable` are resolved by the command line, for `--model` and
+ * `/model`. A `turn.step` hook sets the model on the request itself, which
+ * is a layer below that, so an alias arrives as a literal name and the
+ * engine answers `There's an issue with the selected model (sonnet). It may
+ * not exist` and falls back to something else. The strip shortens these for
+ * display, so the readout still says `sonnet 5.5`.
+ */
+const DEFAULTS = {
+    /** Typos, renames, formatting, comments. */
+    fastModel: 'claude-haiku-5-5',
+    /** Everyday work, and anything the reading is uncertain about. */
+    baseModel: 'claude-sonnet-5-5',
+    /** Planning, refactors, debugging, root causes. */
+    deepModel: 'claude-opus-5-5',
+    /** Whole-system briefs, and whenever you ask for the best model. */
+    topModel: 'claude-fable-5-1',
+    /** Whether the flagship tier is reachable without asking for it by name. */
+    routeToTop: true,
+    /**
+     * The percentage of the five-hour window past which routing stops
+     * reaching for a more expensive model on its own.
+     *
+     * 100 means never hold back: the tier a prompt earns is the tier it
+     * gets, even at 99% of the window. Lower it to keep a reserve for work
+     * you pick by hand.
+     */
+    spareAbove: 100,
+    /** Bar width in columns, brackets included. */
+    barCells: 10,
+    /** Draw with plain ASCII, for a terminal that is not in UTF-8. */
+    ascii: false,
+};
+
+const TIER_KEYS = { fast: 'fastModel', base: 'baseModel', deep: 'deepModel', top: 'topModel' };
+const NEWEST_OPUS = 'claude-opus-5-5';
+
+/**
+ * Keep the subagent row live, and stop entirely when nothing is running.
+ *
+ * A fixed timer would tick for the whole session to show a row that is
+ * almost never there. This reschedules itself only while an agent is
+ * alive, so a session with no subagents runs no timer at all.
+ */
+.
+ */
+const opts = {};
+
+async function headsUp($, e) {
+    const turn = {
+        on: state.headsOn,
+        sinceLast: state.headsSinceLast,
+        toolCalls: (state.lastTurn && state.lastTurn.toolCalls) || 0,
+        answer: e && e.answer,
+    };
+    if (!shouldCheck(turn)) return;
+
+    state.headsSinceLast = 0;
+    try {
+        const ask = buildHeadsPrompt(await $.session.messages());
+        if (!ask) return;
+        const reply = await $.model.complete({ model: opts.fastModel, prompt: ask, maxTokens: 100 });
+        const note = parseHeadsUp(reply);
+        if (note) {
+            state.headsNote = note;
+            $.ui.invalidate('ui.render');
+        }
+    } catch {
+        // Silence is the default answer anyway.
+    }
+}
+
+async function pollAgents($) {
+    if (state.agentTimer) return;
+    state.agentTimer = true;
+
+    const step = async () => {
+        try {
+            state.agents = merge(state.agents, await $.agent.list());
+        } catch {
+            // The list is the only source of a status, but losing it for
+            // one tick is not worth blanking the row over.
+        }
+        state.agents = prune(state.agents);
+        $.ui.invalidate('ui.render');
+
+        if (state.agents.some((a) => isAlive(a.status))) {
+            $.clock.after(2000, step);
+        } else {
+            state.agentTimer = false;
+            $.ui.invalidate('ui.render');
+        }
+    };
+
+    $.clock.after(2000, step);
+}
+
 export function register(on) {
-    const opts = { ...DEFAULTS };
+    Object.assign(opts, DEFAULTS);
 
     // Everything this mod does at session start, in one hook: registering two
     // hooks on the same event without matchers is a load error.
@@ -122,7 +336,7 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|agents]',
         });
 
         // The only timer in the mod, and it exists for one reason: the reset
@@ -233,7 +447,17 @@ export function register(on) {
     // Follow-ups, asked for once a turn has something to follow.
     on('turn.complete', async ($, e, next) => {
         const result = await next(e);
-        if (!state.suggestOn || e.agentId || e.isAborted) return result;
+        if (e.agentId || e.isAborted) return result;
+
+        state.headsSinceLast += 1;
+        const toolCalls = state.turnToolCalls;
+        state.turnToolCalls = 0;
+        state.lastTurn = { answer: e.answer, toolCalls };
+
+        if (!state.suggestOn) {
+            await headsUp($, e);
+            return result;
+        }
 
         const ask = buildSuggestPrompt(state.lastPrompt, e.answer);
         if (!ask) return result;
@@ -253,17 +477,32 @@ export function register(on) {
             // No suggestions is a fine outcome. It is a convenience, and a
             // failure here must not colour the turn that just succeeded.
         }
+
+        await headsUp($, e);
         return result;
     });
 
     // A turn makes one request per step, and each one is redirected. Written as
     // a generator because the response streams: yield* forwards it and gives
     // back the finished result.
+    // A subagent starting is the only moment the monitor needs to wake up.
+    on('agent.spawn', async ($, e, next) => {
+        state.agents = spawned(state.agents, e);
+        await pollAgents($);
+        $.ui.invalidate('ui.render');
+        return next(e);
+    });
+
     on('turn.step', async function* ($, e, next) {
         // A subagent resolves its own model, from its definition or from
         // whoever spawned it. Routing the main conversation should not quietly
-        // downgrade a subagent somebody chose a model for.
-        if (e.agentId) return yield* next(e);
+        // downgrade a subagent somebody chose a model for. Its spend is still
+        // worth recording: that is what the monitor row is measuring.
+        if (e.agentId) {
+            const subResult = yield* next(e);
+            state.agents = addTokens(state.agents, e.agentId, tokensOf(subResult && subResult.usage));
+            return subResult;
+        }
         if (!state.routing || state.pinned || !state.chosen) return yield* next(e);
         if (state.chosen === e.model) return yield* next(e);
         return yield* next({ ...e, model: state.chosen });
@@ -272,6 +511,52 @@ export function register(on) {
     // This fires only for a switch you asked for: /model, the picker, Option+P.
     // Automatic fallbacks do not reach it, which is what makes it a reliable
     // signal that the choice is now yours.
+    // Measure a destructive command before agreeing to it. Claude Code
+    // already asks; what it cannot say is how big the thing is.
+    on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+        state.turnToolCalls += 1;
+        if (!state.blastOn) return next(e);
+
+        const found = assess(e.command);
+        if (!found) return next(e);
+
+        // The preview is argv, never a shell string, and every verb in it
+        // is fixed by which pattern matched. The only part taken from the
+        // command is the target, and it travels as one array element.
+        let count = null;
+        const preview = previewFor(found);
+        if (preview) {
+            try {
+                const run = await $.process.run(preview.argv, { timeout: 10000 });
+                if (run && run.exitCode === 0) count = countLines(run.stdout);
+            } catch {
+                // Unmeasurable. The question is still worth asking, just
+                // without a number in it.
+            }
+        }
+
+        const warning = warningFor(found);
+        const question = describe(found, count) + (warning ? ' ' + warning : '')
+            + '\n\n' + e.command;
+
+        let answer = 'Run it';
+        try {
+            answer = await $.ui.ask(question, ['Run it', 'Cancel']);
+        } catch {
+            // Nobody to ask, as in a -p run. Fall through to the usual
+            // permission prompt rather than blocking unattended work.
+            return next(e);
+        }
+        if (answer !== 'Run it') {
+            return { deny: 'The user cancelled this command after seeing what it would affect.' };
+        }
+        return next(e);
+    }).catch(async ($, e, next) => {
+        // Fails open. A guard that blocks your work when it has a bug is
+        // worse than no guard, and Claude Code still asks on its own.
+        return next(e);
+    });
+
     on('classic.PreModelSwitch', async ($, e, next) => {
         state.pinned = true;
         state.chosen = null;
@@ -301,6 +586,44 @@ export function register(on) {
                     + (opts.routeToTop ? ', whole-system work to ' + shortModel(opts.topModel) : '')
                     + '.',
             };
+        }
+
+        if (verb === 'know' || verb === 'heads') {
+            const how = (words[1] || '').toLowerCase();
+            if (how === 'off') {
+                state.headsOn = false;
+                state.headsNote = null;
+                $.ui.invalidate('ui.render');
+                return { text: 'Heads up off. Nothing will be checked and nothing will be spent on it.' };
+            }
+            if (how === 'on') {
+                state.headsOn = true;
+                return {
+                    text: 'Heads up on, checked by ' + shortModel(opts.fastModel) + ' every few substantial turns.',
+                };
+            }
+            return { text: 'Heads up is ' + (state.headsOn ? 'on' : 'off') + '. Use /hud know on or /hud know off.' };
+        }
+
+        if (verb === 'blast') {
+            const how = (words[1] || '').toLowerCase();
+            if (how === 'off') {
+                state.blastOn = false;
+                return { text: 'Blast radius off. Destructive commands go straight to the usual permission prompt.' };
+            }
+            if (how === 'on') {
+                state.blastOn = true;
+                return { text: 'Blast radius on. A destructive command is measured before you are asked.' };
+            }
+            return { text: 'Blast radius is ' + (state.blastOn ? 'on' : 'off') + '. Use /hud blast on or /hud blast off.' };
+        }
+
+        if (verb === 'agents') {
+            const seen = state.agents;
+            if (!seen.length) return { text: 'No subagents have run in this session.' };
+            const rows = seen.map((a) => '  ' + a.name.padEnd(11) + String(a.status).padEnd(11)
+                + elapsedText(a.startedAt).padStart(6) + '  ' + tokenText(a.tokens).padStart(7));
+            return { text: ['Subagents this session:', ...rows].join(String.fromCharCode(10)) };
         }
 
         if (verb === 'raw') {
@@ -389,6 +712,9 @@ export function register(on) {
         lines.push('  /hud log                 what was routed where, and why');
         lines.push('  /hud tune                what the log says about the patterns');
         lines.push('  /hud suggest on | off    follow-ups under the strip');
+        lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
+        lines.push('  /hud blast on | off      measure a destructive command before running it');
+        lines.push('  /hud agents              every subagent this session has run');
         lines.push('  /hud raw                 what usage() reported, if a reading is missing');
         return { text: lines.join('\n') };
     });
@@ -474,6 +800,61 @@ export function register(on) {
         // text, so one press sends it: a suggestion you have to retype is
         // not a suggestion, it is a reminder.
         const rows = [strip];
+
+        // The subagent row, while there is one. No row at all when there
+        // is not: a line saying "no agents" is a permanent reminder of
+        // nothing.
+        const running = visible(state.agents);
+        if (running.length) {
+            const portions = shares(running);
+            const cells = [
+                Text({ key: 'ag-h', color: 'cyan', children: ['\u27f3 ' + running.length
+                    + (running.length === 1 ? ' agent' : ' agents')] }),
+            ];
+            running.forEach((a, i) => {
+                cells.push(Text({ key: 'ag-s' + i, dimColor: true, children: [' \u2502 '] }));
+                cells.push(Text({ key: 'ag-n' + i, color: statusColor(a.status), children: [a.name] }));
+                cells.push(Text({ key: 'ag-g' + i, children: [' '] }));
+                barPieces(portions[i] * 100, 10, opts.ascii).forEach((piece, j) => {
+                    cells.push(Text({
+                        key: 'ag-b' + i + '-' + j,
+                        color: piece.color,
+                        dimColor: !!piece.dim,
+                        children: [piece.text],
+                    }));
+                });
+                cells.push(Text({
+                    key: 'ag-t' + i,
+                    dimColor: true,
+                    children: [' ' + elapsedText(a.startedAt) + ' ' + tokenText(a.tokens)],
+                }));
+            });
+            rows.push(Box({ key: 'hud-agents', flexDirection: 'row', children: cells }));
+        }
+
+        // One thing you may have missed, until you dismiss it.
+        if (state.headsNote) {
+            rows.push(Box({
+                key: 'hud-heads',
+                flexDirection: 'row',
+                columnGap: 1,
+                children: [
+                    Text({ key: 'hh-i', color: 'yellow', children: ['\u2726 Heads up'] }),
+                    Text({ key: 'hh-t', children: ['\u00b7 ' + state.headsNote] }),
+                    Button({
+                        key: 'hh-x',
+                        label: 'dismiss',
+                        hotkey: '0',
+                        plain: true,
+                        dimColor: true,
+                        onPress: () => {
+                            state.headsNote = null;
+                            $.ui.invalidate('ui.render');
+                        },
+                    }),
+                ],
+            }));
+        }
         if (state.suggestions.length) {
             rows.push(Box({
                 key: 'hud-next',

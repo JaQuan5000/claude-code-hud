@@ -18,6 +18,16 @@
  * exactly what it must not do.
  */
 
+/** The first of these keys that holds an object. */
+function firstObject(obj, keys) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const key of keys) {
+        const value = obj[key];
+        if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    }
+    return null;
+}
+
 /** The first of these keys that holds a usable number. */
 function pick(obj, keys) {
     if (!obj || typeof obj !== 'object') return null;
@@ -50,7 +60,13 @@ export function asPercent(value) {
  * window is the same number by another route.
  */
 export function contextPercentOf(usage) {
-    const ctx = usage && usage.context;
+    if (!usage || typeof usage !== 'object') return null;
+
+    // Looked for under the names a context object plausibly has, but not
+    // loose on the usage object itself: a stray `tokens` or `percent`
+    // belonging to something else would be read as a context reading, and
+    // a confidently wrong number is worse than a missing one.
+    const ctx = firstObject(usage, ['context', 'contextWindow', 'context_window']);
     if (!ctx || typeof ctx !== 'object') return null;
 
     const direct = asPercent(pick(ctx, [
@@ -59,8 +75,10 @@ export function contextPercentOf(usage) {
     ]));
     if (direct !== null) return direct;
 
-    const used = pick(ctx, ['tokens', 'used', 'usedTokens', 'used_tokens', 'currentUsage', 'current_usage', 'inputTokens', 'total_input_tokens']);
-    const window = pick(ctx, ['window', 'size', 'windowSize', 'window_size', 'contextWindow', 'context_window_size', 'max', 'limit']);
+    const used = pick(ctx, ['usedTokens', 'used_tokens', 'currentUsage', 'current_usage',
+        'inputTokens', 'total_input_tokens', 'contextTokens', 'context_tokens', 'tokens', 'used']);
+    const window = pick(ctx, ['contextWindow', 'context_window_size', 'contextWindowSize',
+        'windowSize', 'window_size', 'window', 'size', 'max', 'limit']);
     if (used !== null && window) return Math.max(0, Math.min(100, (used / window) * 100));
 
     const left = pick(ctx, ['remainingPercentage', 'remaining_percentage', 'remainingPercent']);
