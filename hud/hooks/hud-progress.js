@@ -111,3 +111,118 @@ export function countText(plan) {
 export function worthShowing(plan) {
     return !!plan && plan.total >= MIN_PLAN && !plan.complete;
 }
+
+// =====================================================================
+// The newer task tools
+//
+// An interactive session does not write one whole todo list. It adds a task
+// at a time with TaskCreate and flips each by id with TaskUpdate, and
+// TodoWrite is the older path that is not used there. A bar that listens only
+// for TodoWrite therefore never sees a plan in the sessions that most need
+// one, which is how a long job ran with no bar at all.
+//
+// These keep the same plan from the pieces. The ids come back in a tool's
+// *result*, so the hook reads that after the call has run.
+// =====================================================================
+
+/** One field of a tool's input, wherever the event happens to carry it. */
+function inputField(event, key) {
+    if (!event || typeof event !== 'object') return undefined;
+    const holders = [event, event.input, event.args, event.arguments, event.params, event.parameters];
+    for (const holder of holders) {
+        if (holder && typeof holder === 'object' && holder[key] !== undefined) return holder[key];
+    }
+    return undefined;
+}
+
+/** What a tool call answered with, whether or not it is wrapped. */
+function resultOf(result) {
+    if (!result || typeof result !== 'object') return {};
+    const inner = result.result;
+    return inner && typeof inner === 'object' ? inner : result;
+}
+
+function statusName(value) {
+    return String(value || '').toLowerCase().replace(/[\s-]/g, '_');
+}
+
+/**
+ * The plan after one task tool has run.
+ *
+ * `tasks` is an array of `{ id, subject, activeForm, status }` and is never
+ * changed in place. Anything unrecognised returns it as it was, because a
+ * progress bar is decoration and a surprise shape is not worth a wrong one.
+ */
+export function applyTaskTool(tasks, tool, event, result) {
+    const list = Array.isArray(tasks) ? tasks : [];
+    const out = resultOf(result);
+
+    if (tool === 'TaskCreate') {
+        const made = out.task && typeof out.task === 'object' ? out.task : null;
+        const id = made && made.id != null ? String(made.id) : '';
+        // No id means the call did not create anything, so there is nothing to
+        // track. Guessing one would let a later update land on the wrong task.
+        if (!id) return list;
+        // A new job after a finished one starts a fresh plan. Otherwise the
+        // five tasks that were done last hour would be counted in the total
+        // and the bar would open at 60% on work not yet begun.
+        const base = list.length && list.every((t) => t.status === 'completed') ? [] : list;
+        return base.filter((t) => t.id !== id).concat([{
+            id,
+            subject: String((made.subject != null ? made.subject : inputField(event, 'subject')) || ''),
+            activeForm: String(inputField(event, 'activeForm') || ''),
+            status: 'pending',
+        }]);
+    }
+
+    if (tool === 'TaskUpdate') {
+        const id = String(inputField(event, 'taskId') != null ? inputField(event, 'taskId') : (out.taskId || ''));
+        if (!id) return list;
+        // A refused update changed nothing.
+        if (out.success === false) return list;
+
+        const status = statusName(inputField(event, 'status'));
+        if (status === 'deleted') return list.filter((t) => t.id !== id);
+
+        const known = list.find((t) => t.id === id);
+        const patch = {};
+        if (status) patch.status = status;
+        const subject = inputField(event, 'subject');
+        const form = inputField(event, 'activeForm');
+        if (typeof subject === 'string') patch.subject = subject;
+        if (typeof form === 'string') patch.activeForm = form;
+
+        if (known) return list.map((t) => (t.id === id ? { ...t, ...patch } : t));
+        // A task made before the mod was watching. Its name is unknown, but it
+        // still counts: a plan with a hole in it reports the wrong total.
+        return list.concat([{ id, subject: '', activeForm: '', status: patch.status || 'pending', ...patch }]);
+    }
+
+    if (tool === 'TaskList') {
+        const all = Array.isArray(out.tasks) ? out.tasks : null;
+        if (!all) return list;
+        // The list is the whole truth, so it replaces what was inferred.
+        const known = new Map(list.map((t) => [t.id, t]));
+        return all.map((t) => {
+            const id = String(t.id);
+            const before = known.get(id);
+            return {
+                id,
+                subject: String(t.subject || (before && before.subject) || ''),
+                activeForm: (before && before.activeForm) || '',
+                status: statusName(t.status) || 'pending',
+            };
+        });
+    }
+
+    return list;
+}
+
+/** The tracked tasks in the shape progressOf reads. */
+export function todosFromTasks(tasks) {
+    return (Array.isArray(tasks) ? tasks : []).map((t) => ({
+        content: t.subject,
+        activeForm: t.activeForm || t.subject,
+        status: t.status,
+    }));
+}

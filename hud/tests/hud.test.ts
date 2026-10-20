@@ -18,7 +18,7 @@ import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hoo
 import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage, hasFableWindow } from '../hooks/hud-usage.js';
 import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN } from '../hooks/hud-progress.js';
+import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks } from '../hooks/hud-progress.js';
 import { planBar } from '../hooks/hud-format.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
@@ -1762,4 +1762,191 @@ test('and no store at all is the same as an empty one', async () => {
     await hud.start();
     const reply = await hud.say('suggest off');
     expect(reply.text.includes('off')).toBe(true);
+});
+
+// ================================== the plan, from the newer task tools
+//
+// An interactive session does not write one whole list. It adds a task at a
+// time with TaskCreate and flips each by id with TaskUpdate, so a bar that
+// only listens for TodoWrite never sees a plan in the sessions that most need
+// one. These cover keeping the plan from the pieces.
+
+const made = (id, subject) => ({ result: { task: { id, subject } } });
+
+test('TaskCreate adds a pending task, named by the id the tool answered with', async () => {
+    const after = applyTaskTool([], 'TaskCreate', { subject: 'Wire the panel', activeForm: 'Wiring the panel' }, made('7', 'Wire the panel'));
+    expect(after.length).toBe(1);
+    expect(after[0].id).toBe('7');
+    expect(after[0].status).toBe('pending');
+    expect(after[0].activeForm).toBe('Wiring the panel');
+});
+
+test('a TaskCreate that answered with no id creates nothing', async () => {
+    // Guessing an id would let a later update land on the wrong task.
+    expect(applyTaskTool([], 'TaskCreate', { subject: 'x' }, { result: {} }).length).toBe(0);
+    expect(applyTaskTool([], 'TaskCreate', { subject: 'x' }, undefined).length).toBe(0);
+});
+
+test('TaskUpdate flips the task it names and keeps the status spelled right', async () => {
+    const start = [{ id: '1', subject: 'a', activeForm: '', status: 'pending' }];
+    const after = applyTaskTool(start, 'TaskUpdate', { taskId: '1', status: 'in_progress' }, { result: { success: true } });
+    expect(after[0].status).toBe('in_progress');
+});
+
+test('a status with a space or a hyphen is read as the same status', async () => {
+    const start = [{ id: '1', subject: 'a', activeForm: '', status: 'pending' }];
+    expect(applyTaskTool(start, 'TaskUpdate', { taskId: '1', status: 'in-progress' }, {})[0].status).toBe('in_progress');
+    expect(applyTaskTool(start, 'TaskUpdate', { taskId: '1', status: 'In Progress' }, {})[0].status).toBe('in_progress');
+});
+
+test('a refused update changes nothing', async () => {
+    const start = [{ id: '1', subject: 'a', activeForm: '', status: 'pending' }];
+    const after = applyTaskTool(start, 'TaskUpdate', { taskId: '1', status: 'completed' }, { result: { success: false } });
+    expect(after[0].status).toBe('pending');
+});
+
+test('a deleted task leaves the plan', async () => {
+    const start = [
+        { id: '1', subject: 'a', activeForm: '', status: 'pending' },
+        { id: '2', subject: 'b', activeForm: '', status: 'pending' },
+    ];
+    const after = applyTaskTool(start, 'TaskUpdate', { taskId: '1', status: 'deleted' }, {});
+    expect(after.length).toBe(1);
+    expect(after[0].id).toBe('2');
+});
+
+test('a task made before the mod was watching still counts', async () => {
+    // Its name is unknown, but a plan with a hole in it reports the wrong total.
+    const after = applyTaskTool([], 'TaskUpdate', { taskId: '9', status: 'completed' }, {});
+    expect(after.length).toBe(1);
+    expect(after[0].status).toBe('completed');
+});
+
+test('TaskList is the whole truth and replaces what was inferred', async () => {
+    const start = [{ id: '1', subject: 'old', activeForm: 'Doing old', status: 'pending' }];
+    const after = applyTaskTool(start, 'TaskList', {}, { result: { tasks: [
+        { id: '1', subject: 'old', status: 'completed', blockedBy: [] },
+        { id: '2', subject: 'new', status: 'in_progress', blockedBy: [] },
+    ] } });
+    expect(after.length).toBe(2);
+    expect(after[0].status).toBe('completed');
+    // What the list cannot say is kept from what was already known.
+    expect(after[0].activeForm).toBe('Doing old');
+});
+
+test('a new job after a finished one starts a fresh plan', async () => {
+    // Otherwise last hour's five finished tasks sit in the total and the bar
+    // opens at 60% on work that has not begun.
+    const finished = [
+        { id: '1', subject: 'a', activeForm: '', status: 'completed' },
+        { id: '2', subject: 'b', activeForm: '', status: 'completed' },
+    ];
+    const after = applyTaskTool(finished, 'TaskCreate', { subject: 'next job' }, made('3', 'next job'));
+    expect(after.length).toBe(1);
+    expect(after[0].id).toBe('3');
+});
+
+test('but a task added mid-job joins the plan it belongs to', async () => {
+    const running = [
+        { id: '1', subject: 'a', activeForm: '', status: 'completed' },
+        { id: '2', subject: 'b', activeForm: '', status: 'in_progress' },
+    ];
+    expect(applyTaskTool(running, 'TaskCreate', { subject: 'c' }, made('3', 'c')).length).toBe(3);
+});
+
+test('an unrelated tool leaves the plan alone', async () => {
+    const start = [{ id: '1', subject: 'a', activeForm: '', status: 'pending' }];
+    expect(applyTaskTool(start, 'Bash', { command: 'ls' }, {})).toBe(start);
+});
+
+test('the tracked tasks draw as the same bar TodoWrite does', async () => {
+    const tasks = [
+        { id: '1', subject: 'one', activeForm: 'Doing one', status: 'completed' },
+        { id: '2', subject: 'two', activeForm: 'Doing two', status: 'in_progress' },
+        { id: '3', subject: 'three', activeForm: 'Doing three', status: 'pending' },
+        { id: '4', subject: 'four', activeForm: 'Doing four', status: 'pending' },
+    ];
+    const plan = progressOf(todosFromTasks(tasks));
+    expect(plan.total).toBe(4);
+    expect(plan.done).toBe(1);
+    expect(plan.label).toBe('Doing two');
+    expect(worthShowing(plan)).toBe(true);
+});
+
+// And the part that was actually broken: through the real hooks, in the order
+// a session makes the calls, the bar appears.
+
+async function runTaskCalls(calls) {
+    const hooks = [];
+    const on = (event, a, b) => {
+        const matcher = typeof a === 'function' ? null : a;
+        hooks.push({ event, matcher, handler: typeof a === 'function' ? a : b });
+        return { catch: () => undefined };
+    };
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+
+    const el = (type) => (props) => ({ type, ...props });
+    const ctx = {
+        ui: {
+            resolve: () => ({ Box: el('Box'), Text: el('Text'), Svg: el('Svg'), Button: el('Button') }),
+            invalidate: () => undefined,
+        },
+        session: { model: async () => 'claude-opus-5-5' },
+        clock: { after: () => undefined, every: () => undefined },
+    };
+
+    for (const [tool, input, result] of calls) {
+        const hook = hooks.find((h) => h.event === 'tool.call' && h.matcher && h.matcher.tool === tool);
+        expect(!!hook).toBe(true);
+        const answered = await hook.handler(ctx, { tool, ...input }, async () => result);
+        // The hook must hand back exactly what the tool answered.
+        expect(answered).toBe(result);
+    }
+
+    const render = hooks.find((h) => h.event === 'ui.render');
+    return render.handler(ctx, { surface: 'terminal', component: 'AbovePrompt', props: { bodyColumns: 120 } }, async () => null);
+}
+
+const hasBar = (tree) => !!(tree && tree.children && tree.children.find((c) => c.key === 'hud-progress'));
+
+test('a plan built with TaskCreate and TaskUpdate shows the bar', async () => {
+    const tree = await runTaskCalls([
+        ['TaskList', {}, { result: { tasks: [] } }],
+        ['TaskCreate', { subject: 'one' }, made('1', 'one')],
+        ['TaskCreate', { subject: 'two' }, made('2', 'two')],
+        ['TaskCreate', { subject: 'three' }, made('3', 'three')],
+        ['TaskUpdate', { taskId: '1', status: 'completed' }, { result: { success: true } }],
+        ['TaskUpdate', { taskId: '2', status: 'in_progress' }, { result: { success: true } }],
+    ]);
+    expect(hasBar(tree)).toBe(true);
+});
+
+test('and the bar goes when the last task lands', async () => {
+    const tree = await runTaskCalls([
+        ['TaskList', {}, { result: { tasks: [] } }],
+        ['TaskCreate', { subject: 'one' }, made('1', 'one')],
+        ['TaskCreate', { subject: 'two' }, made('2', 'two')],
+        ['TaskUpdate', { taskId: '1', status: 'completed' }, { result: { success: true } }],
+        ['TaskUpdate', { taskId: '2', status: 'completed' }, { result: { success: true } }],
+    ]);
+    expect(hasBar(tree)).toBe(false);
+});
+
+test('one task alone is not a plan', async () => {
+    const tree = await runTaskCalls([
+        ['TaskList', {}, { result: { tasks: [] } }],
+        ['TaskCreate', { subject: 'only' }, made('1', 'only')],
+    ]);
+    expect(hasBar(tree)).toBe(false);
+});
+
+test('a result the hook does not understand never breaks the call', async () => {
+    // Whatever comes back must still reach the model untouched.
+    const tree = await runTaskCalls([
+        ['TaskList', {}, { result: { tasks: [] } }],
+        ['TaskCreate', { subject: 'x' }, 'not even an object'],
+        ['TaskUpdate', { taskId: '1' }, null],
+    ]);
+    expect(hasBar(tree)).toBe(false);
 });

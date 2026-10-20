@@ -27,7 +27,7 @@ import { assess, previewFor, countLines, describe, warningFor } from './hud-blas
 import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 import { readingsFor, worstLevel, needsClock, leadNote, clockText,
     CALM, WATCH, URGENT } from './hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing } from './hud-progress.js';
+import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks } from './hud-progress.js';
 
 /**
  * What the strip draws from.
@@ -65,6 +65,12 @@ const state = {
      * denominator available.
      */
     plan: null,
+    /**
+     * The tasks the newer task tools have made, which arrive one at a time.
+     * TodoWrite sends a whole list and needs none of this; TaskCreate and
+     * TaskUpdate send pieces, so the plan has to be kept between calls.
+     */
+    tasks: [],
     /** The last few routing decisions, for `/hud log` and `/hud tune`. */
     log: [],
     /** Follow-ups offered under the strip, and whether to ask for them. */
@@ -725,6 +731,28 @@ export function register(on) {
         // and decoration must never be the reason a tool call fails.
         return next(e);
     });
+
+    // The same plan, from the task tools an interactive session actually uses.
+    //
+    // TaskCreate adds one task and answers with its id; TaskUpdate flips one
+    // by that id; TaskList answers with all of them. Each is read *after* it
+    // has run, because the id only exists in the answer. The hook never
+    // blocks, rewrites or delays the call, and a shape it does not recognise
+    // leaves the bar as it was.
+    for (const tool of ['TaskCreate', 'TaskUpdate', 'TaskList']) {
+        on('tool.call', { tool }, async ($, e, next) => {
+            const result = await next(e);
+            try {
+                state.tasks = applyTaskTool(state.tasks, tool, e, result);
+                const plan = progressOf(todosFromTasks(state.tasks));
+                state.plan = plan;
+                $.ui.invalidate('ui.render');
+            } catch {
+                // Decoration. Never the reason a tool call fails.
+            }
+            return result;
+        }).catch(async ($, e, next) => next(e));
+    }
 
     on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
         state.turnToolCalls += 1;

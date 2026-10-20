@@ -139,7 +139,7 @@ After a turn, the mod offers two or three next steps, each a key press away:
 
 They come from the cheap model reading the turn that just finished, so they are specific to the work rather than stock phrases: a few hundred tokens of Haiku per turn, with the request capped so a long turn cannot become a long bill. `/hud suggest off` stops it entirely.
 
-It sends a trimmed slice of the prompt and the answer - the same conversation Claude already has, to the same place it already goes. Nothing is stored, nothing is written to disk, and nothing reaches any third party.
+It sends a trimmed slice of the prompt and the answer - the same conversation Claude already has, to the same place it already goes. Nothing about your conversation is stored or written to disk, and nothing reaches any third party.
 
 ## What the mod sends, in full
 
@@ -150,7 +150,7 @@ Two features make their own model requests, and both are **on by default**. Ever
 | Follow-up suggestions | After a turn that produced an answer | A trimmed slice of your prompt and the answer | `/hud suggest off` |
 | Heads-up | At most every few turns, and only after a substantial turn | The last ~2,400 characters of the conversation | `/hud know off` |
 
-Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing is written to disk, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
+Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
 
 If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These four switches (`suggest`, `know`, `blast`, `confirm`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
 
@@ -165,6 +165,20 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 ```
 
 `/hud tune` reads those same records back and says what they imply - a tier that never fires has patterns too narrow, a tier that catches everything has patterns too broad - and lists the words that keep turning up in middle-tier prompts, so you can promote the ones that mean something. It only suggests a word it has seen in more than one prompt, because a rule built from a single sample is a rule that overfits to whatever you did last.
+
+## The progress bar
+
+While Claude works through a multi-step job, a blue bar shows how far along it is:
+
+```
+▸ Wiring the panel  [████▒▒······]  4/12  33%
+```
+
+The solid blocks are tasks that are finished, and the lighter ones are the task in hand. It is blue on purpose: the green-amber-red bars measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
+
+The total comes from Claude's own task list, the plan it writes before it starts and updates as each step lands, so nothing in the bar is estimated. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads both ways Claude keeps that list - the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
+
+If you never see it, check that Claude is actually keeping a task list for the job (`/tasks` shows it). A short question has no plan, so it has no bar.
 
 ## Watching the subagents
 
@@ -291,16 +305,16 @@ The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and 
 
 ## What it can reach
 
-Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses five calls:
+Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses fourteen calls:
 
 ```
-$.agent.list      $.clock.after       $.clock.every     $.command.register
-$.model.complete  $.process.run       $.prompt.submit   $.session.messages
-$.session.model   $.session.usage     $.ui.ask          $.ui.invalidate
-$.ui.resolve
+$.agent.list      $.clock.after       $.command.register  $.model.complete
+$.process.run     $.prompt.submit     $.session.messages  $.session.model
+$.session.usage   $.store.get         $.store.set         $.ui.ask
+$.ui.invalidate   $.ui.resolve
 ```
 
-No filesystem, no environment variables, no storage, no MCP. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
+No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds four on/off switches (`suggest`, `know`, `blast` and `confirm`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
 
 ## What it does not do
 
