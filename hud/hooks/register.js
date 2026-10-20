@@ -52,6 +52,12 @@ const state = {
     clockWanted: false,
     clockRunning: false,
     /**
+     * What you said when the window was nearly gone, kept for the rest of
+     * that window. It used to ask on every prompt and remember nothing, so
+     * one answer became ten of the same question at 95%, 97%, 97%.
+     */
+    quotaDecision: null,
+    /**
      * The plan the turn is working through, from the todo list.
      *
      * Null when there is no plan: most turns answer a question and need no
@@ -64,6 +70,15 @@ const state = {
     /** Follow-ups offered under the strip, and whether to ask for them. */
     suggestions: [],
     suggestOn: true,
+    /**
+     * Whether to stop and ask when the window is nearly gone.
+     *
+     * On by default, because spending the last of a window on a frontier
+     * model is the one decision worth a pause - but only ever once per
+     * window, and `/hud confirm off` turns it off for good. Off means the
+     * routed model is used without asking.
+     */
+    confirmOn: true,
     /** The last usage() reply, for `/hud raw`. */
     lastUsage: null,
     /** Subagents this session has seen, and whether a poll is running. */
@@ -235,6 +250,231 @@ function wantClock($, wanted) {
     $.clock.after(60000, tick);
 }
 
+/**
+ * The switches a person has set, kept across sessions.
+ *
+ * Nothing the mod was told used to survive a restart. `/hud suggest off`,
+ * `/hud know off` and `/hud blast off` all quietly went back to on the next
+ * time Claude Code opened, and the README said they stuck. This keeps the four
+ * feature switches in the mods store, which is the host's and outlives the
+ * module. Routing itself is deliberately not saved: turning it off is
+ * something you do for a task, not a standing preference.
+ *
+ * Every read and write is allowed to fail. A store that is unavailable means
+ * the defaults, never a broken session.
+ */
+const PREF_KEYS = ['suggestOn', 'headsOn', 'blastOn', 'confirmOn'];
+let lastSavedPrefs = '';
+
+async function loadPrefs($) {
+    try {
+        const saved = await $.store.get('prefs');
+        if (saved && typeof saved === 'object') {
+            for (const key of PREF_KEYS) {
+                // Only a real boolean is believed. Anything else is a value
+                // some other version wrote, and the default is safer.
+                if (typeof saved[key] === 'boolean') state[key] = saved[key];
+            }
+        }
+        lastSavedPrefs = JSON.stringify(prefsNow());
+    } catch {
+        // No store: the defaults stand.
+    }
+}
+
+function prefsNow() {
+    const out = {};
+    for (const key of PREF_KEYS) out[key] = !!state[key];
+    return out;
+}
+
+async function savePrefs($) {
+    try {
+        const now = JSON.stringify(prefsNow());
+        // Nothing changed, nothing written: most /hud commands are lookups.
+        if (now === lastSavedPrefs) return;
+        await $.store.set('prefs', prefsNow());
+        lastSavedPrefs = now;
+    } catch {
+        // Not saved this time. The switch still works for this session.
+    }
+}
+
+/**
+ * The /hud command.
+ *
+ * A top-level declaration rather than a closure inside register, because
+ * Claude Code only lets a function receive `$` if it is declared at the top
+ * of the module: a helper defined where it is used cannot be handed the API.
+ */
+async function hudCommand($, e) {
+    const words = String((e && e.args) || '').trim().split(/\s+/).filter(Boolean);
+    const verb = (words[0] || '').toLowerCase();
+
+    if (verb === 'off') {
+        state.routing = false;
+        state.chosen = null;
+        $.ui.invalidate('ui.render');
+        return { text: 'Routing off. The readout stays, and the model is whatever you set.' };
+    }
+
+    if (verb === 'on' || verb === 'auto') {
+        state.routing = true;
+        state.pinned = false;
+        $.ui.invalidate('ui.render');
+        return {
+            text: 'Routing on. Small work goes to ' + shortModel(opts.fastModel)
+                + ', planning to ' + shortModel(opts.deepModel)
+                + (opts.routeToTop ? ', whole-system work to ' + shortModel(opts.topModel) : '')
+                + '.',
+        };
+    }
+
+    if (verb === 'know' || verb === 'heads') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off') {
+            state.headsOn = false;
+            state.headsNote = null;
+            $.ui.invalidate('ui.render');
+            return { text: 'Heads up off. Nothing will be checked and nothing will be spent on it.' };
+        }
+        if (how === 'on') {
+            state.headsOn = true;
+            return {
+                text: 'Heads up on, checked by ' + shortModel(opts.fastModel) + ' every few substantial turns.',
+            };
+        }
+        return { text: 'Heads up is ' + (state.headsOn ? 'on' : 'off') + '. Use /hud know on or /hud know off.' };
+    }
+
+    if (verb === 'blast') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off') {
+            state.blastOn = false;
+            return { text: 'Blast radius off. Destructive commands go straight to the usual permission prompt.' };
+        }
+        if (how === 'on') {
+            state.blastOn = true;
+            return { text: 'Blast radius on. A destructive command is measured before you are asked.' };
+        }
+        return { text: 'Blast radius is ' + (state.blastOn ? 'on' : 'off') + '. Use /hud blast on or /hud blast off.' };
+    }
+
+    if (verb === 'agents') {
+        const seen = state.agents;
+        if (!seen.length) return { text: 'No subagents have run in this session.' };
+        const rows = seen.map((a) => '  ' + a.name.padEnd(11) + String(a.status).padEnd(11)
+            + elapsedText(a.startedAt).padStart(6) + '  ' + tokenText(a.tokens).padStart(7));
+        return { text: ['Subagents this session:', ...rows].join(String.fromCharCode(10)) };
+    }
+
+    if (verb === 'raw') {
+        // What usage() actually returned, for when a field is renamed
+        // again and a reading quietly stops appearing.
+        return { text: describeUsage(state.lastUsage).join("\n") };
+    }
+
+    if (verb === 'log') {
+        return { text: ["What the router decided, newest last:", ...logLines(state.log)].join("\n") };
+    }
+
+    if (verb === 'tune') {
+        return { text: tuneLines(state.log).join("\n") };
+    }
+
+    if (verb === 'confirm') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off') {
+            state.confirmOn = false;
+            return { text: 'No more questions near the limit. Work goes to the model it was routed to, and a window that runs out simply waits for its reset.' };
+        }
+        if (how === 'on') {
+            state.confirmOn = true;
+            return { text: 'It will ask once per window, when the five-hour window passes ' + CONFIRM_ABOVE + '% and the work is expensive.' };
+        }
+        return { text: 'Asking near the limit is ' + (state.confirmOn ? 'on, once per window' : 'off') + '. Use /hud confirm on or /hud confirm off.' };
+    }
+
+    if (verb === 'suggest') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off') {
+            state.suggestOn = false;
+            state.suggestions = [];
+            $.ui.invalidate('ui.render');
+            return { text: 'Follow-up suggestions off. Nothing will call a model on your behalf.' };
+        }
+        if (how === 'on') {
+            state.suggestOn = true;
+            return { text: 'Follow-up suggestions on, asked of ' + shortModel(opts.fastModel) + ' after each turn.' };
+        }
+        return { text: 'Suggestions are ' + (state.suggestOn ? 'on' : 'off') + '. Use /hud suggest on or /hud suggest off.' };
+    }
+
+    if (verb === 'models') {
+        const rows = MODELS.map((m) => '  ' + m.short.padEnd(11) + m.id.padEnd(20) + m.note);
+        return {
+            text: ['Models a tier can be set to:', ...rows,
+                '', 'Set one with /hud set <tier> <model>, as in /hud set deep opus 4.8.',
+                'A bare family name means its newest: opus is ' + shortModel(NEWEST_OPUS) + '.'].join('\n'),
+        };
+    }
+
+    if (verb === 'set') {
+        const tier = (words[1] || '').toLowerCase();
+        const key = TIER_KEYS[tier];
+        if (!key) {
+            return { text: 'Which tier? One of: fast, base, deep, top. As in /hud set deep opus.' };
+        }
+        const wanted = resolveModel(words.slice(2).join(' '));
+        if (!wanted) {
+            return {
+                text: 'No model by that name. Run /hud models to see the list, or give a full id such as claude-opus-5-5.',
+            };
+        }
+        opts[key] = wanted;
+        // The tier of the turn already decided is stale now.
+        state.chosen = null;
+        $.ui.invalidate('ui.render');
+        return {
+            text: tier + ' work now goes to ' + shortModel(wanted) + ' (' + wanted + ')'
+                + ' for this session. Edit DEFAULTS in register.js to make it permanent.',
+        };
+    }
+
+    const lines = [
+        'routing: ' + (state.routing ? 'on' : 'off') + (state.pinned ? ', standing down because you picked a model' : ''),
+        'next request: ' + (state.chosen ? shortModel(state.chosen) : 'whatever the session is on')
+            + (state.reason ? ' (' + state.reason + ')' : ''),
+        '',
+        '  fast  ' + shortModel(opts.fastModel),
+        '  base  ' + shortModel(opts.baseModel),
+        '  deep  ' + shortModel(opts.deepModel),
+        '  top   ' + (opts.routeToTop ? shortModel(opts.topModel) : 'off'),
+        '',
+        'context: ' + (state.contextPercent == null ? 'unknown' : Math.round(state.contextPercent) + '% used'),
+    ];
+    for (const limit of state.rateLimits) {
+        lines.push(limit.kind + ': ' + Math.round(limit.percentUsed) + '% used');
+    }
+    if (!state.rateLimits.length) {
+        lines.push('quota: not reported for this account');
+    }
+    lines.push('');
+    lines.push('');
+    lines.push('  /hud off | auto          stop routing, or hand the choice back');
+    lines.push('  /hud models              every model a tier can be set to');
+    lines.push('  /hud set <tier> <model>  point one tier somewhere else');
+    lines.push('  /hud log                 what was routed where, and why');
+    lines.push('  /hud tune                what the log says about the patterns');
+    lines.push('  /hud suggest on | off    follow-ups under the strip');
+    lines.push('  /hud confirm on | off    the question near the limit (asked once per window)');
+    lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
+    lines.push('  /hud blast on | off      measure a destructive command before running it');
+    lines.push('  /hud agents              every subagent this session has run');
+    lines.push('  /hud raw                 what usage() reported, if a reading is missing');
+    return { text: lines.join('\n') };
+}
+
 async function pollAgents($) {
     if (state.agentTimer) return;
     state.agentTimer = true;
@@ -269,8 +509,11 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|agents]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|agents]',
         });
+
+        // What you switched off last time stays off.
+        await loadPrefs($);
 
         // No timer is started here any more. The strip asks for one while a
         // countdown is actually on screen and lets it go when the last one
@@ -336,12 +579,21 @@ export function register(on) {
         const five = (state.rateLimits || []).find((l) => l.kind === 'five_hour');
         const used = five && typeof five.percentUsed === 'number' ? five.percentUsed : 0;
         const expensive = picked.tier === 'top' || picked.tier === 'deep';
-        if (expensive && used >= CONFIRM_ABOVE) {
+        // Below the line again means the window reset: the next time it is
+        // nearly gone is a new question, asked once.
+        if (used < CONFIRM_ABOVE) state.quotaDecision = null;
+
+        if (expensive && used >= CONFIRM_ABOVE && state.confirmOn) {
             const cheaper = picked.tier === 'top' ? opts.deepModel : opts.baseModel;
             const goOn = 'Use ' + shortModel(picked.model);
             const instead = 'Use ' + shortModel(cheaper) + ' instead';
             let answer = goOn;
-            try {
+            if (state.quotaDecision) {
+                // Already answered this window. A typed answer that was not
+                // one of the options counts as "carry on", and either way
+                // the point is that it is not asked again.
+                answer = state.quotaDecision === 'cheaper' ? instead : goOn;
+            } else try {
                 answer = await $.ui.ask(
                     'The five-hour window is ' + Math.round(used) + '% used, and this reads as '
                         + picked.tier + ' work. Which model should it go to?',
@@ -352,7 +604,11 @@ export function register(on) {
                 // chosen rather than silently downgrading a decision.
             }
             if (answer === 'Cancel this prompt') {
+                // Cancelling one prompt is not a standing order.
                 return { drop: 'Cancelled, so the window keeps what was left of it.' };
+            }
+            if (!state.quotaDecision) {
+                state.quotaDecision = answer === instead ? 'cheaper' : 'go';
             }
             if (answer === instead) {
                 picked = { model: cheaper, tier: picked.tier === 'top' ? 'deep' : 'base', held: true };
@@ -522,158 +778,11 @@ export function register(on) {
         return next(e);
     });
 
+    // Whatever the command changed is kept for next time.
     on('command.run', { command: 'hud' }, async ($, e) => {
-        const words = String((e && e.args) || '').trim().split(/\s+/).filter(Boolean);
-        const verb = (words[0] || '').toLowerCase();
-
-        if (verb === 'off') {
-            state.routing = false;
-            state.chosen = null;
-            $.ui.invalidate('ui.render');
-            return { text: 'Routing off. The readout stays, and the model is whatever you set.' };
-        }
-
-        if (verb === 'on' || verb === 'auto') {
-            state.routing = true;
-            state.pinned = false;
-            $.ui.invalidate('ui.render');
-            return {
-                text: 'Routing on. Small work goes to ' + shortModel(opts.fastModel)
-                    + ', planning to ' + shortModel(opts.deepModel)
-                    + (opts.routeToTop ? ', whole-system work to ' + shortModel(opts.topModel) : '')
-                    + '.',
-            };
-        }
-
-        if (verb === 'know' || verb === 'heads') {
-            const how = (words[1] || '').toLowerCase();
-            if (how === 'off') {
-                state.headsOn = false;
-                state.headsNote = null;
-                $.ui.invalidate('ui.render');
-                return { text: 'Heads up off. Nothing will be checked and nothing will be spent on it.' };
-            }
-            if (how === 'on') {
-                state.headsOn = true;
-                return {
-                    text: 'Heads up on, checked by ' + shortModel(opts.fastModel) + ' every few substantial turns.',
-                };
-            }
-            return { text: 'Heads up is ' + (state.headsOn ? 'on' : 'off') + '. Use /hud know on or /hud know off.' };
-        }
-
-        if (verb === 'blast') {
-            const how = (words[1] || '').toLowerCase();
-            if (how === 'off') {
-                state.blastOn = false;
-                return { text: 'Blast radius off. Destructive commands go straight to the usual permission prompt.' };
-            }
-            if (how === 'on') {
-                state.blastOn = true;
-                return { text: 'Blast radius on. A destructive command is measured before you are asked.' };
-            }
-            return { text: 'Blast radius is ' + (state.blastOn ? 'on' : 'off') + '. Use /hud blast on or /hud blast off.' };
-        }
-
-        if (verb === 'agents') {
-            const seen = state.agents;
-            if (!seen.length) return { text: 'No subagents have run in this session.' };
-            const rows = seen.map((a) => '  ' + a.name.padEnd(11) + String(a.status).padEnd(11)
-                + elapsedText(a.startedAt).padStart(6) + '  ' + tokenText(a.tokens).padStart(7));
-            return { text: ['Subagents this session:', ...rows].join(String.fromCharCode(10)) };
-        }
-
-        if (verb === 'raw') {
-            // What usage() actually returned, for when a field is renamed
-            // again and a reading quietly stops appearing.
-            return { text: describeUsage(state.lastUsage).join("\n") };
-        }
-
-        if (verb === 'log') {
-            return { text: ["What the router decided, newest last:", ...logLines(state.log)].join("\n") };
-        }
-
-        if (verb === 'tune') {
-            return { text: tuneLines(state.log).join("\n") };
-        }
-
-        if (verb === 'suggest') {
-            const how = (words[1] || '').toLowerCase();
-            if (how === 'off') {
-                state.suggestOn = false;
-                state.suggestions = [];
-                $.ui.invalidate('ui.render');
-                return { text: 'Follow-up suggestions off. Nothing will call a model on your behalf.' };
-            }
-            if (how === 'on') {
-                state.suggestOn = true;
-                return { text: 'Follow-up suggestions on, asked of ' + shortModel(opts.fastModel) + ' after each turn.' };
-            }
-            return { text: 'Suggestions are ' + (state.suggestOn ? 'on' : 'off') + '. Use /hud suggest on or /hud suggest off.' };
-        }
-
-        if (verb === 'models') {
-            const rows = MODELS.map((m) => '  ' + m.short.padEnd(11) + m.id.padEnd(20) + m.note);
-            return {
-                text: ['Models a tier can be set to:', ...rows,
-                    '', 'Set one with /hud set <tier> <model>, as in /hud set deep opus 4.8.',
-                    'A bare family name means its newest: opus is ' + shortModel(NEWEST_OPUS) + '.'].join('\n'),
-            };
-        }
-
-        if (verb === 'set') {
-            const tier = (words[1] || '').toLowerCase();
-            const key = TIER_KEYS[tier];
-            if (!key) {
-                return { text: 'Which tier? One of: fast, base, deep, top. As in /hud set deep opus.' };
-            }
-            const wanted = resolveModel(words.slice(2).join(' '));
-            if (!wanted) {
-                return {
-                    text: 'No model by that name. Run /hud models to see the list, or give a full id such as claude-opus-5-5.',
-                };
-            }
-            opts[key] = wanted;
-            // The tier of the turn already decided is stale now.
-            state.chosen = null;
-            $.ui.invalidate('ui.render');
-            return {
-                text: tier + ' work now goes to ' + shortModel(wanted) + ' (' + wanted + ')'
-                    + ' for this session. Edit DEFAULTS in register.js to make it permanent.',
-            };
-        }
-
-        const lines = [
-            'routing: ' + (state.routing ? 'on' : 'off') + (state.pinned ? ', standing down because you picked a model' : ''),
-            'next request: ' + (state.chosen ? shortModel(state.chosen) : 'whatever the session is on')
-                + (state.reason ? ' (' + state.reason + ')' : ''),
-            '',
-            '  fast  ' + shortModel(opts.fastModel),
-            '  base  ' + shortModel(opts.baseModel),
-            '  deep  ' + shortModel(opts.deepModel),
-            '  top   ' + (opts.routeToTop ? shortModel(opts.topModel) : 'off'),
-            '',
-            'context: ' + (state.contextPercent == null ? 'unknown' : Math.round(state.contextPercent) + '% used'),
-        ];
-        for (const limit of state.rateLimits) {
-            lines.push(limit.kind + ': ' + Math.round(limit.percentUsed) + '% used');
-        }
-        if (!state.rateLimits.length) {
-            lines.push('quota: not reported for this account');
-        }
-        lines.push('');
-        lines.push('');
-        lines.push('  /hud off | auto          stop routing, or hand the choice back');
-        lines.push('  /hud models              every model a tier can be set to');
-        lines.push('  /hud set <tier> <model>  point one tier somewhere else');
-        lines.push('  /hud log                 what was routed where, and why');
-        lines.push('  /hud tune                what the log says about the patterns');
-        lines.push('  /hud suggest on | off    follow-ups under the strip');
-        lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
-        lines.push('  /hud blast on | off      measure a destructive command before running it');
-        lines.push('  /hud agents              every subagent this session has run');
-        lines.push('  /hud raw                 what usage() reported, if a reading is missing');
-        return { text: lines.join('\n') };
+        const out = await hudCommand($, e);
+        await savePrefs($);
+        return out;
     });
 
     // The strip itself. Drawn from `state` alone, so this stays cheap: the

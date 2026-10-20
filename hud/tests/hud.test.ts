@@ -1572,3 +1572,194 @@ test('a calm reading spends no gauge and a busy one does', async () => {
     expect(has('rdsession')).toBe(false);
     expect(has('rdweek')).toBe(true);
 });
+
+// ================================== the question is asked once, not forever
+//
+// At 90% of the window the mod asks how to proceed with expensive work. It
+// asked again on every prompt afterwards, at 95%, 97%, 97% and 97%, because
+// nothing remembered the answer. One decision per window is the contract.
+
+async function promptsAt(percent, answers, count, beforePrompts) {
+    const hooks = [];
+    const on = (event, a, b) => {
+        hooks.push({ event, handler: typeof a === 'function' ? a : b });
+        return { catch: () => undefined };
+    };
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+
+    const asked = [];
+    const ui = {
+        invalidate: () => undefined,
+        ask: async (q, options) => { asked.push(options); return answers.shift(); },
+    };
+    const next = async (e) => e;
+    const soon = Math.floor(Date.now() / 1000) + 3600;
+
+    const measure = async (pct) => hooks.find((h) => h.event === 'session.measure').handler({
+        session: { usage: async () => ({ rateLimits: [{ kind: 'five_hour', percentUsed: pct, resetsAt: soon }] }) },
+        ui,
+    }, {}, next);
+    const submit = hooks.find((h) => h.event === 'prompt.submit');
+    const ctx = {
+        ui,
+        session: { model: async () => 'claude-opus-5-5', messages: async () => [] },
+        clock: { after: () => undefined, every: () => undefined },
+    };
+
+    // A window that has reset forgets the last answer. Doing that first is
+    // also what keeps these tests from leaning on each other, since the
+    // module's state outlives a single test.
+    await measure(5);
+    await submit.handler(ctx, { text: 'fix a typo' }, next);
+    asked.length = 0;
+
+    await measure(percent);
+    if (beforePrompts) await beforePrompts(hooks, ctx);
+    for (let i = 0; i < count; i += 1) {
+        await submit.handler({
+            ui,
+            session: { model: async () => 'claude-opus-5-5', messages: async () => [] },
+            clock: { after: () => undefined, every: () => undefined },
+        }, { text: 'plan the whole migration and refactor the architecture' }, next);
+    }
+    return asked.length;
+}
+
+test('it asks about the nearly-full window once, however many prompts follow', async () => {
+    expect(await promptsAt(92, ['Use opus 5.5', 'Use opus 5.5', 'Use opus 5.5', 'Use opus 5.5'], 4)).toBe(1);
+});
+
+test('and a typed answer counts as an answer rather than a reason to ask again', async () => {
+    expect(await promptsAt(97, ['use fable if it can finish, otherwise opus', 'x', 'x'], 3)).toBe(1);
+});
+
+test('/hud confirm off stops the question for good', async () => {
+    const off = async (hooks, ctx) => {
+        const cmd = hooks.find((h) => h.event === 'command.run');
+        const reply = await cmd.handler(ctx, { args: 'confirm off' });
+        expect(reply.text.includes('No more questions')).toBe(true);
+    };
+    expect(await promptsAt(96, ['x', 'x', 'x'], 3, off)).toBe(0);
+});
+
+test('and /hud confirm on brings it back, once', async () => {
+    const cycle = async (hooks, ctx) => {
+        const cmd = hooks.find((h) => h.event === 'command.run');
+        await cmd.handler(ctx, { args: 'confirm off' });
+        await cmd.handler(ctx, { args: 'confirm on' });
+    };
+    expect(await promptsAt(96, ['Use opus 5.5', 'x', 'x'], 3, cycle)).toBe(1);
+});
+
+// ============================================== what you set stays set
+//
+// Nothing the mod was told survived a restart: the switches went back to on
+// the next session, and the README said they stuck. These cover the store
+// round trip, and that a store that misbehaves can never break a session.
+
+async function hudWith(store) {
+    const hooks = [];
+    const on = (event, a, b) => {
+        hooks.push({ event, handler: typeof a === 'function' ? a : b });
+        return { catch: () => undefined };
+    };
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+    const ctx = {
+        store,
+        ui: { invalidate: () => undefined },
+        command: { register: async () => undefined },
+        session: { usage: async () => ({}), model: async () => 'claude-opus-5-5' },
+        clock: { after: () => undefined, every: () => undefined },
+    };
+    const next = async (e) => e;
+
+    // Module state outlives a single test, so every test begins from a known
+    // baseline: all four switches on, loaded the way a fresh session loads
+    // them. Without this a test can pass because an earlier one left things
+    // as it wanted them, which proves nothing.
+    ctx.store = memoryStore({ prefs: { suggestOn: true, headsOn: true, blastOn: true, confirmOn: true } });
+    await hooks.find((h) => h.event === 'session.start').handler(ctx, {}, next);
+    ctx.store = store;
+
+    return {
+        start: () => hooks.find((h) => h.event === 'session.start').handler(ctx, {}, next),
+        say: (args) => hooks.find((h) => h.event === 'command.run').handler(ctx, { args }),
+    };
+}
+
+function memoryStore(initial) {
+    const data = new Map(Object.entries(initial || {}));
+    const writes = [];
+    return {
+        data, writes,
+        get: async (k) => data.get(k),
+        set: async (k, v) => { writes.push([k, v]); data.set(k, JSON.parse(JSON.stringify(v))); },
+    };
+}
+
+test('a switch you turn off is saved', async () => {
+    const store = memoryStore();
+    const hud = await hudWith(store);
+    await hud.start();
+    await hud.say('confirm on');   // a known starting point
+    store.writes.length = 0;
+    await hud.say('suggest off');
+    const saved = store.data.get('prefs');
+    expect(saved.suggestOn).toBe(false);
+    expect(saved.confirmOn).toBe(true);
+});
+
+test('and it is still off after a restart', async () => {
+    const store = memoryStore({ prefs: { suggestOn: false, headsOn: false, blastOn: true, confirmOn: false } });
+    const hud = await hudWith(store);
+    await hud.start();
+    // The status sentence, not the word "off": every reply ends with a hint
+    // that mentions "/hud confirm off", so a bare includes('off') is true
+    // whether or not anything was restored.
+    expect((await hud.say('confirm')).text.startsWith('Asking near the limit is off')).toBe(true);
+    expect((await hud.say('suggest')).text.startsWith('Suggestions are off')).toBe(true);
+    expect((await hud.say('know')).text.startsWith('Heads up is off')).toBe(true);
+    expect((await hud.say('blast')).text.startsWith('Blast radius is on')).toBe(true);
+});
+
+test('a lookup writes nothing', async () => {
+    const store = memoryStore({ prefs: { suggestOn: true, headsOn: true, blastOn: true, confirmOn: true } });
+    const hud = await hudWith(store);
+    await hud.start();
+    await hud.say('confirm on');
+    await hud.say('suggest on');
+    await hud.say('models');
+    expect(store.writes.length).toBe(0);
+});
+
+test('a value some other version wrote is not believed', async () => {
+    // Falsy non-booleans, because the defaults are all on: a value that
+    // would be read as true anyway cannot tell "ignored" from "believed".
+    const store = memoryStore({ prefs: { suggestOn: 0, headsOn: '', blastOn: null, confirmOn: 'false' } });
+    const hud = await hudWith(store);
+    await hud.start();
+    expect((await hud.say('suggest')).text.includes('are on')).toBe(true);
+    expect((await hud.say('know')).text.includes('is on')).toBe(true);
+    expect((await hud.say('blast')).text.includes('is on')).toBe(true);
+    expect((await hud.say('confirm')).text.includes('on, once per window')).toBe(true);
+});
+
+test('a store that throws never breaks a session or a command', async () => {
+    const broken = {
+        get: async () => { throw new Error('store unavailable'); },
+        set: async () => { throw new Error('store unavailable'); },
+    };
+    const hud = await hudWith(broken);
+    await hud.start();
+    const reply = await hud.say('suggest off');
+    expect(reply.text.includes('off')).toBe(true);
+});
+
+test('and no store at all is the same as an empty one', async () => {
+    const hud = await hudWith(undefined);
+    await hud.start();
+    const reply = await hud.say('suggest off');
+    expect(reply.text.includes('off')).toBe(true);
+});

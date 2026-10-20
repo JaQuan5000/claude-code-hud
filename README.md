@@ -127,7 +127,7 @@ Routing never holds back by default: the tier a prompt earns is the tier it gets
 > The five-hour window is 91% used, and this reads as top work. Which model should it go to?
 > Use fable 5.1 / Use opus 5.5 instead / Cancel this prompt
 
-Both conditions have to hold, which is rare enough not to nag. In a `claude -p` run, where there is nobody to ask, it carries on as chosen rather than silently downgrading.
+Both conditions have to hold, which is rare enough not to nag. It asks **once per window**: your answer is remembered until the window drops back under the line, which is what a reset does, so a long job at 95% is not stopped again at every prompt. `/hud confirm off` stops the question entirely, and the work simply goes to the model it was routed to. In a `claude -p` run, where there is nobody to ask, it carries on as chosen rather than silently downgrading.
 
 ## Follow-ups under the strip
 
@@ -152,7 +152,7 @@ Two features make their own model requests, and both are **on by default**. Ever
 
 Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing is written to disk, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
 
-If you would rather it never spoke to a model without being asked, put `/hud suggest off` and `/hud know off` in your first session; the setting sticks.
+If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These four switches (`suggest`, `know`, `blast`, `confirm`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
 
 ## Tuning the routing on real data
 
@@ -231,6 +231,7 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud suggest on` / `off` | Follow-up suggestions under the strip |
 | `/hud agents` | Every subagent this session has run, with status and spend |
 | `/hud know on` / `off` | The heads-up check after a big turn |
+| `/hud confirm on` / `off` | The question near the limit, asked once per window |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
