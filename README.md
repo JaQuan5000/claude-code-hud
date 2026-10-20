@@ -178,7 +178,27 @@ The solid blocks are tasks that are finished, and the lighter ones are the task 
 
 The total comes from Claude's own task list, the plan it writes before it starts and updates as each step lands, so nothing in the bar is estimated. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads both ways Claude keeps that list - the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
 
-If you never see it, check that Claude is actually keeping a task list for the job (`/tasks` shows it). A short question has no plan, so it has no bar.
+If you never see it, run `/hud plan`. It says how many task calls the mod has actually seen this session, whether a plan is being tracked, and which of the usual reasons applies: Claude is not keeping a task list for the job (`/tasks` shows whether it is), the mod was updated but Claude Code has not been restarted since, or the plan is under two tasks or already finished. A short question has no plan, so it has no bar.
+
+## The desktop sidebar
+
+In the Claude desktop app the whole HUD lives in a panel on the right, beside the conversation, as a stack of rounded cards in the same style as the app's own (Environment, Context, Outputs, Changes). Each has a title you can press to fold it.
+
+| Card | What it holds |
+|---|---|
+| **Model** | The model on this turn, whether it is routed (`auto`), pinned or manual, and why it was chosen |
+| **Usage** | Context, Session, Week and any other window, each with a gauge, the time it resets and a pace warning if you are outrunning it |
+| **Progress** | The blue bar, then the task list item by item: the one in hand first, then what is waiting |
+| **Agents** | Each running subagent by name, how long it has run and what it has used |
+| **Routing** | Which model each tier points at, and the last few decisions. Folded to start with |
+
+A card with nothing to say is left out rather than drawn empty, so with no plan and no agents you see two cards.
+
+While the panel is showing, the strip above the prompt steps aside, since it would only say everything twice. It comes back by itself whenever the panel is not actually on screen, such as a window too narrow for it, or after you close it, so the numbers are never missing from both places at once. Follow-up suggestions and the heads-up note stay above the prompt, because they are things you press.
+
+`/hud panel` opens it, and `/hud panel off` closes it and puts the strip back. If you close it with the panel's own close mark it stays closed until you ask for it.
+
+**The terminal is never touched.** The panel is opened only for the desktop app, and the terminal strip, progress bar and agent row are drawn exactly as before.
 
 ## Watching the subagents
 
@@ -246,6 +266,8 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud agents` | Every subagent this session has run, with status and spend |
 | `/hud know on` / `off` | The heads-up check after a big turn |
 | `/hud confirm on` / `off` | The question near the limit, asked once per window |
+| `/hud panel` / `panel off` | The desktop sidebar: open it, or close it and put the strip back |
+| `/hud plan` | What the progress bar has seen, and why it is or is not showing |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
@@ -305,13 +327,14 @@ The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and 
 
 ## What it can reach
 
-Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses fourteen calls:
+Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses eighteen calls:
 
 ```
-$.agent.list      $.clock.after       $.command.register  $.model.complete
-$.process.run     $.prompt.submit     $.session.messages  $.session.model
-$.session.usage   $.store.get         $.store.set         $.ui.ask
-$.ui.invalidate   $.ui.resolve
+$.agent.list        $.clock.after       $.command.register  $.model.complete
+$.process.run       $.prompt.submit     $.session.messages  $.session.model
+$.session.surfaces  $.session.usage     $.store.get         $.store.set
+$.ui.ask            $.ui.close          $.ui.invalidate     $.ui.open
+$.ui.panes          $.ui.resolve
 ```
 
 No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds four on/off switches (`suggest`, `know`, `blast` and `confirm`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.

@@ -226,3 +226,49 @@ export function todosFromTasks(tasks) {
         status: t.status,
     }));
 }
+
+/**
+ * What the progress bar has seen, in words, for `/hud plan`.
+ *
+ * The bar is silent when there is no plan, which is also exactly what it does
+ * when something upstream is wrong: the mod is out of date, the tool is not
+ * being called, a result came back in a shape it does not read. From the
+ * outside those look identical, and finding out which took a round trip each
+ * time. This says which, by counting what actually arrived.
+ *
+ * `seen` is how many calls of each plan tool have gone past this session.
+ */
+export function planReport({ seen, tasks, plan }) {
+    const counts = seen || {};
+    const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList']
+        .reduce((n, k) => n + (counts[k] || 0), 0);
+    const tracked = Array.isArray(tasks) ? tasks.length : 0;
+
+    const lines = [];
+    lines.push(plan
+        ? 'plan: ' + plan.done + '/' + plan.total + ' done (' + Math.round(plan.percent) + '%)'
+            + (plan.complete ? ', finished' : '')
+        : 'plan: none');
+    lines.push('tasks tracked from the task tools: ' + tracked);
+    lines.push('plan tool calls seen this session: TaskCreate ' + (counts.TaskCreate || 0)
+        + ', TaskUpdate ' + (counts.TaskUpdate || 0)
+        + ', TaskList ' + (counts.TaskList || 0)
+        + ', TodoWrite ' + (counts.TodoWrite || 0)
+        + (counts.last ? ', last was ' + counts.last : ''));
+    lines.push('');
+
+    if (total === 0) {
+        lines.push('No plan tool has been called in this session, so there is nothing to draw.');
+        lines.push('If Claude is working through a big job, either it is not keeping a task list for it');
+        lines.push('(ask it to plan the work as tasks), or this mod was loaded before it was updated');
+        lines.push('and needs Claude Code restarted.');
+    } else if (!plan) {
+        lines.push('Tasks have been seen, but there is no bar. A plan needs two or more tasks,');
+        lines.push('and the bar goes the moment the last one is done.');
+    } else if (plan.complete) {
+        lines.push('The plan is finished, so the bar has gone. It returns with the next job.');
+    } else {
+        lines.push('The bar should be showing' + ' above the strip, or in the sidebar on the desktop.');
+    }
+    return lines;
+}

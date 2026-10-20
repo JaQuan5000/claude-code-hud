@@ -27,7 +27,8 @@ import { assess, previewFor, countLines, describe, warningFor } from './hud-blas
 import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 import { readingsFor, worstLevel, needsClock, leadNote, clockText,
     CALM, WATCH, URGENT } from './hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks } from './hud-progress.js';
+import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks, planReport } from './hud-progress.js';
+import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 
 /**
  * What the strip draws from.
@@ -71,6 +72,18 @@ const state = {
      * TaskUpdate send pieces, so the plan has to be kept between calls.
      */
     tasks: [],
+    /** The plan item by item, for the sidebar. The bar only needs counts. */
+    planItems: [],
+    /** How many calls of each plan tool have passed, for `/hud plan`. */
+    planSeen: { TodoWrite: 0, TaskCreate: 0, TaskUpdate: 0, TaskList: 0, last: '' },
+    /**
+     * The sidebar. `paneDismissed` is set when the person closes it, so it is
+     * not reopened behind their back; `paneTried` makes the one attempt from
+     * the band happen once. `collapsed` is which cards they have folded.
+     */
+    paneDismissed: false,
+    paneTried: false,
+    collapsed: { ...DEFAULT_COLLAPSED },
     /** The last few routing decisions, for `/hud log` and `/hud tune`. */
     log: [],
     /** Follow-ups offered under the strip, and whether to ask for them. */
@@ -388,6 +401,31 @@ async function hudCommand($, e) {
         return { text: tuneLines(state.log).join("\n") };
     }
 
+    if (verb === 'plan') {
+        return {
+            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan }).join('\n'),
+        };
+    }
+
+    if (verb === 'panel') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off' || how === 'close') {
+            state.paneDismissed = true;
+            try { await $.ui.close({ id: PANE_ID }); } catch { /* not open */ }
+            $.ui.invalidate('ui.render');
+            return { text: 'Sidebar closed. The strip is back above the prompt.' };
+        }
+        // Asked for by name, so it is placed at any width.
+        state.paneDismissed = false;
+        let opened = null;
+        try { opened = await $.ui.open({ id: PANE_ID, title: 'HUD' }); } catch { /* no surface */ }
+        if (opened && opened.isPlaced) {
+            $.ui.invalidate('ui.render');
+            return { text: 'Sidebar open. /hud panel off puts the strip back above the prompt.' };
+        }
+        return { text: 'Nothing here can draw a sidebar. It is made for the desktop app; the strip above the prompt stays.' };
+    }
+
     if (verb === 'confirm') {
         const how = (words[1] || '').toLowerCase();
         if (how === 'off') {
@@ -474,11 +512,104 @@ async function hudCommand($, e) {
     lines.push('  /hud tune                what the log says about the patterns');
     lines.push('  /hud suggest on | off    follow-ups under the strip');
     lines.push('  /hud confirm on | off    the question near the limit (asked once per window)');
+    lines.push('  /hud panel [off]         the desktop sidebar: open it, or put the strip back');
+    lines.push('  /hud plan                what the progress bar has seen, and why it is or is not showing');
     lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
     lines.push('  /hud blast on | off      measure a destructive command before running it');
     lines.push('  /hud agents              every subagent this session has run');
     lines.push('  /hud raw                 what usage() reported, if a reading is missing');
     return { text: lines.join('\n') };
+}
+
+/**
+ * The model's name, as the strip and the sidebar both say it.
+ *
+ * What was chosen for this turn if routing chose one, else what the session
+ * reports, else a question mark. Asked in one place so the two cannot name
+ * different models.
+ */
+async function modelName($) {
+    if (state.chosen) return shortModel(state.chosen);
+    try {
+        const current = await $.session.model();
+        const raw = typeof current === 'string'
+            ? current
+            : (current && (current.display_name || current.displayName || current.id)) || '?';
+        return shortModel(raw);
+    } catch {
+        return '?';
+    }
+}
+
+/**
+ * Open the sidebar, unless the person closed it.
+ *
+ * Only ever called for the desktop app. The terminal never attaches through
+ * `session.attach` and is never offered this, which is what keeps it exactly
+ * as it was: panes exist there too, so opening one unconditionally would
+ * have changed a terminal that was already right.
+ */
+async function openSidebar($) {
+    if (state.paneDismissed) return false;
+    try {
+        const opened = await $.ui.open({ id: PANE_ID, title: 'HUD' });
+        return !!(opened && opened.isPlaced);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Is the sidebar actually on screen right now?
+ *
+ * Asked of the engine each time rather than remembered, because it changes
+ * without us: a narrow window leaves it opened but undrawn, and the person can
+ * close it. The strip above the prompt steps aside only while this is true, so
+ * the information is never missing from both places at once.
+ */
+async function sidebarShown($) {
+    try {
+        const panes = await $.ui.panes();
+        return panes.some((pane) => pane.id === PANE_ID && pane.isPlaced);
+    } catch {
+        return false;
+    }
+}
+
+/** Everything the sidebar draws, gathered from state that is already there. */
+function panelData($, model) {
+    const readings = readingsFor({
+        contextPercent: state.contextPercent,
+        rateLimits: state.rateLimits,
+        labelOf: shortKind,
+    });
+    const agents = visible(state.agents);
+    return {
+        model,
+        pinned: state.pinned,
+        routingOn: state.routing,
+        reason: state.reason,
+        readings,
+        worst: worstLevel(readings),
+        plan: worthShowing(state.plan) ? state.plan : null,
+        planItems: state.planItems,
+        agents,
+        agentShares: shares(agents),
+        tiers: {
+            fast: shortModel(opts.fastModel),
+            base: shortModel(opts.baseModel),
+            deep: shortModel(opts.deepModel),
+            top: opts.routeToTop ? shortModel(opts.topModel) : 'off',
+        },
+        // Newest first, which is how a person reads "recent".
+        log: state.log.slice().reverse().map((entry) => ({ tier: entry.tier, short: entry.short })),
+        collapsed: state.collapsed,
+        resetCountdown: resetText,
+        toggle: (key) => {
+            state.collapsed = { ...state.collapsed, [key]: !state.collapsed[key] };
+            $.ui.invalidate('ui.render');
+        },
+    };
 }
 
 async function pollAgents($) {
@@ -515,11 +646,19 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|agents]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|agents]',
         });
 
         // What you switched off last time stays off.
         await loadPrefs($);
+
+        // The sidebar is for the desktop app. The terminal is not offered it,
+        // so it is exactly as it was.
+        try {
+            if ((await $.session.surfaces()).includes('desktop')) await openSidebar($);
+        } catch {
+            // No surface to ask: nothing to open.
+        }
 
         // No timer is started here any more. The strip asks for one while a
         // countdown is actually on screen and lets it go when the last one
@@ -641,7 +780,10 @@ export function register(on) {
         // A finished plan is a receipt, and the turn ending is receipt
         // enough. An unfinished one stays: the work is still outstanding and
         // the next turn usually picks it up.
-        if (state.plan && state.plan.complete) state.plan = null;
+        if (state.plan && state.plan.complete) {
+            state.plan = null;
+            state.planItems = [];
+        }
 
         const result = await next(e);
         if (e.agentId || e.isAborted) return result;
@@ -717,9 +859,12 @@ export function register(on) {
     // gets out of the way - it never blocks or alters the call.
     on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
         try {
+            state.planSeen.TodoWrite += 1;
+            state.planSeen.last = 'TodoWrite';
             const plan = progressOf(todosFrom(e));
             if (plan) {
                 state.plan = plan;
+                state.planItems = todosFrom(e);
                 $.ui.invalidate('ui.render');
             }
         } catch {
@@ -730,6 +875,38 @@ export function register(on) {
         // Fails open, like the Bash hook: reading the plan is decoration,
         // and decoration must never be the reason a tool call fails.
         return next(e);
+    });
+
+    // The desktop app joined the session: give it the sidebar. The terminal's
+    // own attachment raises nothing, so this never fires for it.
+    on('session.attach', async ($, e, next) => {
+        if (e.surface === 'desktop') await openSidebar($);
+        return next(e);
+    }).catch(async ($, e, next) => next(e));
+
+    // The person closed it. Remember, so it is not reopened behind their back;
+    // the strip above the prompt comes back by itself, since the sidebar is no
+    // longer shown. `/hud panel` opens it again.
+    on('ui.close', async ($, e, next) => {
+        if (e.id === PANE_ID && e.origin === 'person') {
+            state.paneDismissed = true;
+            $.ui.invalidate('ui.render');
+        }
+        return next(e);
+    }).catch(async ($, e, next) => next(e));
+
+    // The sidebar itself. Drawn from state alone, like the strip, so a redraw
+    // is arithmetic on numbers already gathered and no request.
+    //
+    // The id is written out rather than taken from PANE_ID so the validator
+    // can read it; a test pins the two together.
+    on('ui.render', { component: 'Pane', requestId: 'hud' }, async ($, e, next) => {
+        // Only the desktop app is given this. Anything else asking falls
+        // through to whatever else would draw.
+        if (e.surface !== 'desktop') return next(e);
+        const ui = $.ui.resolve(e);
+        if (typeof ui.Svg !== 'function') return next(e);
+        return buildPanel(ui, panelData($, await modelName($)));
     });
 
     // The same plan, from the task tools an interactive session actually uses.
@@ -743,9 +920,12 @@ export function register(on) {
         on('tool.call', { tool }, async ($, e, next) => {
             const result = await next(e);
             try {
+                state.planSeen[tool] += 1;
+                state.planSeen.last = tool;
                 state.tasks = applyTaskTool(state.tasks, tool, e, result);
                 const plan = progressOf(todosFromTasks(state.tasks));
                 state.plan = plan;
+                state.planItems = todosFromTasks(state.tasks);
                 $.ui.invalidate('ui.render');
             } catch {
                 // Decoration. Never the reason a tool call fails.
@@ -819,20 +999,18 @@ export function register(on) {
         // No early return for "nothing measured yet": the model is always
         // worth saying, and a strip that appears a turn late looks broken.
         const { Box, Text, Svg, Button } = $.ui.resolve(e);
-        let model = state.chosen;
-        if (!model) {
-            try {
-                const current = await $.session.model();
-                model = typeof current === 'string'
-                    ? current
-                    : (current && (current.display_name || current.displayName || current.id)) || '?';
-            } catch {
-                model = '?';
-            }
-        }
         // The column is ten wide and the ids are not: 'claude-sonnet-5-5'
-        // would draw as 'claude-son'.
-        model = shortModel(model);
+        // would draw as 'claude-son'. modelName shortens it.
+        const model = await modelName($);
+
+        // On the desktop the strip moves into the sidebar, while the sidebar is
+        // actually on screen. One attempt to open it from here covers a desktop
+        // that attached before this module was listening.
+        if (e.surface === 'desktop' && !state.paneTried) {
+            state.paneTried = true;
+            await openSidebar($);
+        }
+        const sidebar = e.surface === 'desktop' && (await sidebarShown($));
 
         // Worked out once and used by both surfaces, so the terminal and the
         // desktop can never disagree about what matters.
@@ -850,8 +1028,11 @@ export function register(on) {
         // time this costs nothing at all.
         wantClock($, needsClock(readings));
 
-        let strip;
-        if (e.surface === 'desktop' && typeof Svg === 'function') {
+        let strip = null;
+        if (sidebar) {
+            // The sidebar carries the strip, the plan and the agents. Nothing
+            // is built here, so a shown sidebar costs the band nothing.
+        } else if (e.surface === 'desktop' && typeof Svg === 'function') {
             // The Desktop app draws vector art, so it gets a real gauge
             // rather than a drawing made of characters. Labels stay as Text,
             // which follows the app's light or dark theme; only the gauges
@@ -986,7 +1167,7 @@ export function register(on) {
 
         // The plan first, because it is the thing you are actually watching
         // while a long job runs. It is absent on an ordinary turn.
-        if (worthShowing(state.plan)) {
+        if (!sidebar && worthShowing(state.plan)) {
             const plan = state.plan;
             const bar = [];
             if (e.surface === 'desktop' && typeof Svg === 'function') {
@@ -1047,11 +1228,11 @@ export function register(on) {
             }));
         }
 
-        rows.push(strip);
+        if (strip) rows.push(strip);
 
         // One line, only when a window will actually run out before it
         // resets. Three stacked warnings are three warnings nobody reads.
-        if (lead) {
+        if (!sidebar && lead) {
             rows.push(Box({
                 key: 'hud-pace',
                 flexDirection: 'row',
@@ -1071,7 +1252,7 @@ export function register(on) {
         // is not: a line saying "no agents" is a permanent reminder of
         // nothing.
         const running = visible(state.agents);
-        if (running.length) {
+        if (!sidebar && running.length) {
             const portions = shares(running);
             const cells = [
                 Text({ key: 'ag-h', color: 'cyan', children: ['\u27f3 ' + running.length
@@ -1164,7 +1345,10 @@ export function register(on) {
                 })),
             }));
         }
-        const mine = rows.length === 1 ? strip : Box({ flexDirection: 'column', children: rows });
+        // Nothing of ours to show: the sidebar has it all and there is no
+        // follow-up or heads-up to offer. Leave the band to whoever else draws.
+        if (!rows.length) return next(e);
+        const mine = rows.length === 1 ? rows[0] : Box({ flexDirection: 'column', children: rows });
 
         // Keep whatever the mods after this one drew in the band, above
         // ours, rather than taking the band for ourselves.

@@ -18,8 +18,9 @@ import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hoo
 import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage, hasFableWindow } from '../hooks/hud-usage.js';
 import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks } from '../hooks/hud-progress.js';
+import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport } from '../hooks/hud-progress.js';
 import { planBar } from '../hooks/hud-format.js';
+import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
 import { assess, firstPath, previewFor, countLines, describe, warningFor } from '../hooks/hud-blast.js';
@@ -1505,7 +1506,9 @@ async function renderDesktopStrip(rateLimits, contextPercent) {
         ui,
     }, {}, next);
 
-    const render = hooks.find((h) => h.event === 'ui.render');
+    // The band, by name: there is a second ui.render hook now, the sidebar's,
+    // and asking for "the" render hook would hand back whichever came first.
+    const render = hooks.find((h) => h.event === 'ui.render' && h.matcher && h.matcher.component === 'AbovePrompt');
     return render.handler({
         ui,
         session: { model: async () => 'claude-opus-5-5' },
@@ -1904,7 +1907,9 @@ async function runTaskCalls(calls) {
         expect(answered).toBe(result);
     }
 
-    const render = hooks.find((h) => h.event === 'ui.render');
+    // The band, by name: there is a second ui.render hook now, the sidebar's,
+    // and asking for "the" render hook would hand back whichever came first.
+    const render = hooks.find((h) => h.event === 'ui.render' && h.matcher && h.matcher.component === 'AbovePrompt');
     return render.handler(ctx, { surface: 'terminal', component: 'AbovePrompt', props: { bodyColumns: 120 } }, async () => null);
 }
 
@@ -1949,4 +1954,438 @@ test('a result the hook does not understand never breaks the call', async () => 
         ['TaskUpdate', { taskId: '1' }, null],
     ]);
     expect(hasBar(tree)).toBe(false);
+});
+
+// ====================================================== the desktop sidebar
+//
+// The whole HUD as a stack of cards, for the desktop app. Two promises matter
+// more than any detail of how it looks. The terminal must never be touched,
+// since panes exist there too and an unconditional open would have changed a
+// terminal that was already right. And the information must never be missing
+// from both places at once: the strip steps aside only while the sidebar is
+// really on screen.
+
+const elOf = (type) => (props) => ({ type, ...props });
+const factories = { Box: elOf('Box'), Text: elOf('Text'), Svg: elOf('Svg'), Button: elOf('Button') };
+
+function walk(node, visit) {
+    if (!node || typeof node !== 'object') return;
+    visit(node);
+    for (const child of node.children || []) walk(child, visit);
+}
+
+function hasKey(tree, key) {
+    let found = false;
+    walk(tree, (n) => { if (n.key === key) found = true; });
+    return found;
+}
+
+function textsOf(tree) {
+    const out = [];
+    walk(tree, (n) => { if (n.type === 'Text') out.push((n.children || []).join('')); });
+    return out.join(' | ');
+}
+
+const reading = (key, label, percent, extra) => ({
+    key, label, percent, level: percent >= 86 ? 'urgent' : percent >= 56 ? 'watch' : 'calm',
+    resetsAt: null, resetForm: 'none', note: '', ...extra,
+});
+
+// ---- the pure builder
+
+test('an empty sidebar is just the model card', async () => {
+    const tree = buildPanel(factories, { model: 'opus 5.5', worst: 'calm', readings: [], collapsed: {} });
+    expect(hasKey(tree, 'card-hud')).toBe(true);
+    expect(hasKey(tree, 'card-usage')).toBe(false);
+    expect(hasKey(tree, 'card-progress')).toBe(false);
+    expect(hasKey(tree, 'card-agents')).toBe(false);
+});
+
+test('a card with nothing to say is left out, not drawn empty', async () => {
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'calm', readings: [], plan: null, agents: [], collapsed: {},
+    });
+    expect(tree.children.length).toBe(1);
+});
+
+test('every reading gets a row and a gauge', async () => {
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'watch', collapsed: {},
+        readings: [reading('ctx', 'Ctx', 15), reading('session', 'Session', 58), reading('week', 'Week', 71)],
+    });
+    for (const k of ['ctx', 'session', 'week']) {
+        expect(hasKey(tree, 'u-' + k)).toBe(true);
+        expect(hasKey(tree, 'u-g-' + k)).toBe(true);
+    }
+});
+
+test('a window with a reset says when it resets', async () => {
+    const far = Math.floor(Date.now() / 1000) + 40 * 3600;
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'calm', collapsed: {},
+        readings: [reading('week', 'Week', 40, { resetsAt: far, resetForm: 'clock' })],
+    });
+    expect(textsOf(tree).includes('resets')).toBe(true);
+});
+
+test('context has no reset line, because it does not reset', async () => {
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'calm', collapsed: {}, readings: [reading('ctx', 'Ctx', 15)],
+    });
+    expect(textsOf(tree).includes('resets')).toBe(false);
+});
+
+test('a folded card is only its header', async () => {
+    const data = {
+        model: 'opus 5.5', worst: 'calm', readings: [reading('ctx', 'Ctx', 15)],
+        collapsed: { usage: true },
+    };
+    const tree = buildPanel(factories, data);
+    expect(hasKey(tree, 'card-usage')).toBe(true);
+    expect(hasKey(tree, 'u-ctx')).toBe(false);
+    // The header still says the one figure worth knowing.
+    expect(textsOf(tree).includes('15%')).toBe(true);
+});
+
+test('pressing a card header asks to fold it', async () => {
+    let asked = null;
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'calm', readings: [reading('ctx', 'Ctx', 15)],
+        collapsed: {}, toggle: (key) => { asked = key; },
+    });
+    let button = null;
+    walk(tree, (n) => { if (n.type === 'Button' && n.key === 'b-usage') button = n; });
+    expect(!!button).toBe(true);
+    button.onPress();
+    expect(asked).toBe('usage');
+});
+
+test('the plan is listed item by item, the one in hand first', async () => {
+    const plan = { total: 4, done: 1, doing: 1, percent: 25, donePercent: 25, reachedPercent: 50, complete: false };
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'calm', readings: [], collapsed: {}, plan,
+        planItems: [
+            { content: 'alpha-finished', status: 'completed' },
+            { content: 'two', activeForm: 'Doing two', status: 'in_progress' },
+            { content: 'three', status: 'pending' },
+            { content: 'four', status: 'pending' },
+        ],
+    });
+    expect(hasKey(tree, 'card-progress')).toBe(true);
+    const text = textsOf(tree);
+    expect(text.includes('Doing two')).toBe(true);
+    expect(text.indexOf('Doing two') < text.indexOf('three')).toBe(true);
+    // A finished task is a count, not a row. A distinctive name, because a
+    // short one is found inside "1 done" and proves nothing.
+    expect(text.includes('alpha-finished')).toBe(false);
+    expect(text.includes('1 done')).toBe(true);
+});
+
+test('a long plan says how many more there are', async () => {
+    const items = [];
+    for (let i = 0; i < 12; i += 1) items.push({ content: 'task ' + i, status: 'pending' });
+    const plan = { total: 12, done: 0, doing: 0, percent: 0, donePercent: 0, reachedPercent: 0, complete: false };
+    const tree = buildPanel(factories, { model: 'm', worst: 'calm', readings: [], collapsed: {}, plan, planItems: items });
+    expect(textsOf(tree).includes('and 5 more')).toBe(true);
+});
+
+test('agents are listed by name, with how long they have run', async () => {
+    const tree = buildPanel(factories, {
+        model: 'm', worst: 'calm', readings: [], collapsed: {},
+        agents: [{ name: 'general', status: 'running', startedAt: Date.now() - 200000, tokens: 3100000 }],
+        agentShares: [1],
+    });
+    expect(hasKey(tree, 'card-agents')).toBe(true);
+    expect(textsOf(tree).includes('general')).toBe(true);
+});
+
+test('one agent is not given a share, since one agent is all of them', async () => {
+    const tree = buildPanel(factories, {
+        model: 'm', worst: 'calm', readings: [], collapsed: {},
+        agents: [{ name: 'general', status: 'running', startedAt: Date.now(), tokens: 10 }],
+        agentShares: [1],
+    });
+    expect(textsOf(tree).includes('of all agent work')).toBe(false);
+});
+
+test('two agents are each given their share', async () => {
+    const tree = buildPanel(factories, {
+        model: 'm', worst: 'calm', readings: [], collapsed: {},
+        agents: [
+            { name: 'a', status: 'running', startedAt: Date.now(), tokens: 75 },
+            { name: 'b', status: 'running', startedAt: Date.now(), tokens: 25 },
+        ],
+        agentShares: [0.75, 0.25],
+    });
+    expect(textsOf(tree).includes('75%')).toBe(true);
+    expect(textsOf(tree).includes('25%')).toBe(true);
+});
+
+test('routing shows each tier and starts folded', async () => {
+    expect(DEFAULT_COLLAPSED.routing).toBe(true);
+    const tree = buildPanel(factories, {
+        model: 'm', worst: 'calm', readings: [], routingOn: true,
+        tiers: { fast: 'haiku 5.5', base: 'sonnet 5.5', deep: 'opus 5.5', top: 'fable 5.1' },
+        log: [{ tier: 'deep', short: 'opus 5.5' }], collapsed: {},
+    });
+    const text = textsOf(tree);
+    for (const m of ['haiku 5.5', 'sonnet 5.5', 'opus 5.5', 'fable 5.1']) expect(text.includes(m)).toBe(true);
+});
+
+test('no text in the sidebar is left free to wrap mid-word', async () => {
+    // The rule the strip learned: a label that tears across two lines is worse
+    // than one that ends in an ellipsis.
+    const plan = { total: 3, done: 1, doing: 1, percent: 33, donePercent: 33, reachedPercent: 66, complete: false };
+    const tree = buildPanel(factories, {
+        model: 'opus 5.5', worst: 'watch', pinned: false, routingOn: true, reason: 'deep work',
+        readings: [reading('ctx', 'Ctx', 15), reading('week', 'Week', 71)],
+        plan, planItems: [{ content: 'a', activeForm: 'Doing a', status: 'in_progress' }],
+        agents: [{ name: 'g', status: 'running', startedAt: Date.now(), tokens: 5 }], agentShares: [1],
+        tiers: { fast: 'a', base: 'b', deep: 'c', top: 'd' }, log: [{ tier: 'deep', short: 'x' }],
+        collapsed: {},
+    });
+    let bare = 0;
+    walk(tree, (n) => { if (n.type === 'Text' && !n.wrap) bare += 1; });
+    expect(bare).toBe(0);
+});
+
+// ---- through the real hooks
+
+async function sidebarSession(opts) {
+    const o = Object.assign({ surfaces: ['terminal'], placed: false }, opts || {});
+    const hooks = [];
+    const on = (event, a, b) => {
+        hooks.push({ event, matcher: typeof a === 'function' ? null : a, handler: typeof a === 'function' ? a : b });
+        return { catch: () => undefined };
+    };
+    const mod = await import('../hooks/register.js');
+    mod.register(on);
+
+    const calls = { open: [], close: [] };
+    const ctx = {
+        ui: {
+            resolve: () => factories,
+            invalidate: () => undefined,
+            open: async (args) => { calls.open.push(args); return { isPlaced: o.placed }; },
+            close: async (args) => { calls.close.push(args); },
+            panes: async () => [{ id: 'hud', title: 'HUD', isShown: o.placed, isFocused: false, isPlaced: o.placed }],
+        },
+        session: {
+            surfaces: async () => o.surfaces,
+            model: async () => 'claude-opus-5-5',
+            usage: async () => ({ context: { percent: 40 }, rateLimits: [] }),
+        },
+        command: { register: async () => undefined },
+        clock: { after: () => undefined, every: () => undefined },
+    };
+    const next = async (e) => e;
+    const find = (event, component) => hooks.find((h) => h.event === event
+        && (!component || (h.matcher && h.matcher.component === component)));
+
+    // Each test begins with the sidebar not dismissed, the way a new session does.
+    await find('command.run').handler(ctx, { args: 'panel' });
+    calls.open.length = 0;
+    calls.close.length = 0;
+
+    return {
+        calls, ctx, hooks, next,
+        start: () => find('session.start').handler(ctx, {}, next),
+        attach: (surface) => find('session.attach').handler(ctx, { surface, clientId: surface + ':default' }, next),
+        closed: (origin) => find('ui.close').handler(ctx, { id: 'hud', origin }, next),
+        band: (surface) => find('ui.render', 'AbovePrompt').handler(ctx, { surface, component: 'AbovePrompt' }, async () => null),
+        pane: (surface) => find('ui.render', 'Pane').handler(ctx, { surface, component: 'Pane', requestId: 'hud' }, async () => 'fell through'),
+        say: (args) => find('command.run').handler(ctx, { args }),
+    };
+}
+
+test('the sidebar is never offered to the terminal', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    await h.start();
+    expect(h.calls.open.length).toBe(0);
+});
+
+test('and not on a session with nothing attached at all', async () => {
+    const h = await sidebarSession({ surfaces: [] });
+    await h.start();
+    expect(h.calls.open.length).toBe(0);
+});
+
+test('it is opened when the desktop app is there at the start', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal', 'desktop'], placed: true });
+    await h.start();
+    expect(h.calls.open.length).toBe(1);
+    expect(h.calls.open[0].id).toBe(PANE_ID);
+});
+
+test('it is opened when the desktop app attaches later', async () => {
+    const h = await sidebarSession({ placed: true });
+    await h.attach('desktop');
+    expect(h.calls.open.length).toBe(1);
+});
+
+test('and not for a phone or an editor, which are not the desktop', async () => {
+    const h = await sidebarSession({ placed: true });
+    await h.attach('mobile');
+    await h.attach('vscode');
+    expect(h.calls.open.length).toBe(0);
+});
+
+test('a sidebar the person closed is not reopened behind their back', async () => {
+    const h = await sidebarSession({ placed: true });
+    await h.closed('person');
+    await h.attach('desktop');
+    expect(h.calls.open.length).toBe(0);
+});
+
+test('but a close that was not theirs does not count as their choice', async () => {
+    const h = await sidebarSession({ placed: true });
+    await h.closed('plugin');
+    await h.attach('desktop');
+    expect(h.calls.open.length).toBe(1);
+});
+
+test('/hud panel opens it again after it was closed', async () => {
+    const h = await sidebarSession({ placed: true });
+    await h.closed('person');
+    const reply = await h.say('panel');
+    expect(h.calls.open.length).toBe(1);
+    expect(reply.text.includes('Sidebar open')).toBe(true);
+});
+
+test('/hud panel off closes it and says the strip is back', async () => {
+    const h = await sidebarSession({ placed: true });
+    const reply = await h.say('panel off');
+    expect(h.calls.close.length).toBe(1);
+    expect(h.calls.close[0].id).toBe(PANE_ID);
+    expect(reply.text.includes('strip is back')).toBe(true);
+});
+
+test('/hud panel where nothing can draw it says so rather than pretending', async () => {
+    const h = await sidebarSession({ placed: false });
+    const reply = await h.say('panel');
+    expect(reply.text.includes('Nothing here can draw')).toBe(true);
+});
+
+test('on the desktop with the sidebar showing, the strip steps aside', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    const tree = await h.band('desktop');
+    // Whatever else the band may carry, the strip itself is not in it.
+    expect(hasKey(tree, 'id')).toBe(false);
+    expect(hasKey(tree, 'rdctx')).toBe(false);
+});
+
+test('but never while the sidebar is not actually on screen', async () => {
+    // Opened but waiting undrawn, in a window too narrow for it. The strip
+    // must stay, or the numbers are missing from both places at once.
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: false });
+    const tree = await h.band('desktop');
+    expect(!!tree).toBe(true);
+    expect(hasKey(tree, 'id')).toBe(true);
+});
+
+test('and the terminal always keeps its strip, whatever a pane says', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal'], placed: true });
+    const tree = await h.band('terminal');
+    expect(!!tree).toBe(true);
+    expect(tree.type).toBe('Box');
+});
+
+test('the sidebar draws for the desktop and for nothing else', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    expect((await h.pane('desktop')).type).toBe('Box');
+    expect(await h.pane('terminal')).toBe('fell through');
+    expect(await h.pane('mobile')).toBe('fell through');
+});
+
+test('the drawn sidebar carries the model and the usage', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    const tree = await h.pane('desktop');
+    expect(hasKey(tree, 'card-hud')).toBe(true);
+    expect(hasKey(tree, 'card-usage')).toBe(true);
+});
+
+test('the pane is drawn by the hook that matches the id it is opened under', async () => {
+    // The render hook's matcher spells the id out so the validator can read
+    // it, and the opener uses the constant. If the two ever drift the pane
+    // opens and nothing draws it, which looks exactly like a blank sidebar.
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    const drawer = h.hooks.find((x) => x.event === 'ui.render' && x.matcher && x.matcher.component === 'Pane');
+    expect(drawer.matcher.requestId).toBe(PANE_ID);
+    await h.attach('desktop');
+    expect(h.calls.open[0].id).toBe(drawer.matcher.requestId);
+});
+
+// ===================================== why is there no progress bar? /hud plan
+//
+// The bar is silent when there is no plan, which is also exactly what it does
+// when something upstream is wrong. From the outside those are identical, and
+// telling them apart used to take a round trip. /hud plan says which, by
+// counting what actually arrived.
+
+const none = { TodoWrite: 0, TaskCreate: 0, TaskUpdate: 0, TaskList: 0, last: '' };
+
+test('/hud plan says no plan tool has been called, and what to do about it', async () => {
+    const text = planReport({ seen: none, tasks: [], plan: null }).join('\n');
+    expect(text.includes('No plan tool has been called')).toBe(true);
+    // The two real causes, so the person knows which to chase.
+    expect(text.includes('not keeping a task list')).toBe(true);
+    expect(text.includes('restarted')).toBe(true);
+});
+
+test('it says tasks were seen but there is no bar, and why that is correct', async () => {
+    const text = planReport({
+        seen: { ...none, TaskCreate: 1, last: 'TaskCreate' },
+        tasks: [{ id: '1', subject: 'a', status: 'pending' }],
+        plan: null,
+    }).join('\n');
+    expect(text.includes('Tasks have been seen, but there is no bar')).toBe(true);
+    expect(text.includes('two or more')).toBe(true);
+});
+
+test('it says the bar should be showing when there is a live plan', async () => {
+    const plan = { total: 4, done: 1, doing: 1, percent: 25, complete: false };
+    const text = planReport({ seen: { ...none, TaskCreate: 4, TaskUpdate: 2, last: 'TaskUpdate' }, tasks: [{}, {}, {}, {}], plan }).join('\n');
+    expect(text.includes('1/4 done (25%)')).toBe(true);
+    expect(text.includes('The bar should be showing')).toBe(true);
+});
+
+test('it says when the plan is finished and the bar has gone', async () => {
+    const plan = { total: 2, done: 2, doing: 0, percent: 100, complete: true };
+    const text = planReport({ seen: { ...none, TaskCreate: 2, last: 'TaskUpdate' }, tasks: [{}, {}], plan }).join('\n');
+    expect(text.includes('finished')).toBe(true);
+    expect(text.includes('has gone')).toBe(true);
+});
+
+test('it lists exactly how many of each call went past', async () => {
+    const text = planReport({
+        seen: { TodoWrite: 3, TaskCreate: 5, TaskUpdate: 7, TaskList: 2, last: 'TaskList' },
+        tasks: [], plan: null,
+    }).join('\n');
+    expect(text.includes('TaskCreate 5, TaskUpdate 7, TaskList 2, TodoWrite 3')).toBe(true);
+    expect(text.includes('last was TaskList')).toBe(true);
+});
+
+test('a missing record reads as nothing seen rather than crashing', async () => {
+    const text = planReport({}).join('\n');
+    expect(text.includes('No plan tool has been called')).toBe(true);
+});
+
+test('a task call going through the real hook is counted, and /hud plan sees it', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    const countOf = async () => {
+        const text = (await h.say('plan')).text;
+        const m = text.match(/TaskCreate (\d+)/);
+        return m ? Number(m[1]) : -1;
+    };
+    const before = await countOf();
+    const hook = h.hooks.find((x) => x.event === 'tool.call' && x.matcher && x.matcher.tool === 'TaskCreate');
+    await hook.handler(h.ctx, { tool: 'TaskCreate', subject: 'counted' }, async () => ({ result: { task: { id: 'plan-test-1', subject: 'counted' } } }));
+    const after = await countOf();
+    expect(after).toBe(before + 1);
+});
+
+test('and /hud plan is listed in the help', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    const text = (await h.say('')).text;
+    expect(text.includes('/hud plan')).toBe(true);
 });
