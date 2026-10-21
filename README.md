@@ -153,16 +153,17 @@ It sends a trimmed slice of the prompt and the answer - the same conversation Cl
 
 ## What the mod sends, in full
 
-Two features make their own model requests, and both are **on by default**. Everything else in the mod is arithmetic on numbers Claude Code already has, and makes no requests at all. A third thing, plan tracking, adds a short fixed note to the system prompt of your own requests; it makes no request of its own (see [Plan tracking](#plan-tracking)).
+Three features make their own model requests, and all are **on by default**. Everything else in the mod is arithmetic on numbers Claude Code already has, and makes no requests at all. A third thing, plan tracking, adds a short fixed note to the system prompt of your own requests; it makes no request of its own (see [Plan tracking](#plan-tracking)).
 
 | Feature | When it fires | What it sends | Turn it off |
 |---|---|---|---|
 | Follow-up suggestions | After a turn that produced an answer | A trimmed slice of your prompt and the answer | `/hud suggest off` |
 | Heads-up | At most every few turns, and only after a substantial turn | The last ~2,400 characters of the conversation | `/hud know off` |
+| Estimated plan | During a long job with no task list, at most once a minute | Your latest request, the descriptions of subagents sent, the **names** of files touched, and Claude's last reply, trimmed. Never a command, never a directory | `/hud estimate off` |
 
-Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
+All three go to your own model on your own account - the same conversation, to the same place it already goes - and all are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest`, `know` and `estimate` all off, the mod makes no requests at all.
 
-If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These five switches (`suggest`, `know`, `blast`, `confirm`, `track`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
+If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These six switches (`suggest`, `know`, `blast`, `confirm`, `track`, `estimate`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
 
 ## Tuning the routing on real data
 
@@ -203,6 +204,16 @@ So the mod adds one short note to the system prompt, after the engine's own sect
 **A reminder in the middle of a long job.** The note in the system prompt is enough for a new session and not for one that has been working for hours, whose own history of hundreds of calls with no task list in them outweighs a paragraph at the top. So when eight tool calls in a row have gone by with no plan, the mod attaches one sentence to the next tool result, where the model reads it as part of the work: no task list exists, so the bar the person is watching is empty; write at least three separate tasks, one per step, and tick them as they finish. It says so at most four times for one job, forty calls apart, and never once a plan exists. It never changes a result and is never shown to you. Tried against a real session resumed with a long task-less history: without it the model made no tasks, with it the model wrote three on the next step.
 
 Plan tracking is a prompt-level feature, so it does not run where an organization manages Claude Code and restricts plugins from changing prompts; there the bar still works for any plan Claude writes.
+
+## An estimated plan
+
+Asking Claude to keep a task list works for a fresh session and not reliably for a long one. A model with hours of task-less history carries on as it has been, and was seen ignoring both the note in the system prompt and the reminder beside a tool result. A bar that appears only when the model cooperates is mostly not there, so the mod can work the plan out from the work.
+
+After about twelve tool calls with no task list, and again when a substantial turn ends, never more than once a minute, the cheap model is shown what is visible from outside: your latest request, the subagents sent (their descriptions say what each was for), the names of the files edited, and Claude's last reply. It answers with the steps of the whole job and which are done, or `NONE` when this is a question or a small change. The bar then draws it with a tilde before the count (`Tasks ~4/9`), and the sidebar says it is an estimate.
+
+What is sent is narrow on purpose. A command is never included, since a command can carry a token or a password. A file is named by its last path segment only. A step that was done stays done, so the bar does not go backwards, and a list that shares almost nothing with the last one is taken as a new job. A task list Claude writes itself always wins, and the estimate gives way to it at once. `/hud estimate off` removes it and the requests with it.
+
+Tried against the real session that never showed a bar: a moment between small edits was answered `NONE`, and a moment in the middle of a multi-plan run came back as a nine-step plan, six done and three under way, which matched the work.
 
 ## The desktop sidebar
 
@@ -301,6 +312,7 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud panel` / `panel off` | The desktop sidebar: open it, or close it and put the strip back |
 | `/hud plan` | What the progress bar has seen, and why it is or is not showing |
 | `/hud track on` / `off` | Asking Claude to keep a task list for long jobs, so the bar has something to count |
+| `/hud estimate on` / `off` | Working a plan out from the work itself when Claude keeps none |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |

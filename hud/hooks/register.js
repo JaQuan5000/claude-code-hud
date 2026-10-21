@@ -33,6 +33,7 @@ import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFro
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
 import { projectionText } from './hud-pace.js';
+import { buildPlanPrompt, parsePlan, stabilise, toTodos, inferDue, isNone } from './hud-infer.js';
 
 /**
  * What the strip draws from.
@@ -124,6 +125,15 @@ const state = {
     remind: { calls: 0, reminders: 0 },
     /** The tools the last request offered, learned when the prompt was composed. */
     offered: null,
+    /**
+     * A plan worked out from the work when Claude kept none: the steps, the
+     * bar's reading of them and the items, and whether to bother. See hud-infer.js.
+     */
+    est: null,
+    estPlan: null,
+    estItems: [],
+    inferOn: true,
+    infer: { calls: 0, turnCalls: 0, lastAt: 0, busy: false },
     /** What the guard has looked at: how many commands, and the ones it stopped on. */
     guardSeen: 0,
     guards: [],
@@ -301,7 +311,7 @@ function wantClock($, wanted) {
  * Every read and write is allowed to fail. A store that is unavailable means
  * the defaults, never a broken session.
  */
-const PREF_KEYS = ['suggestOn', 'headsOn', 'blastOn', 'confirmOn', 'trackOn'];
+const PREF_KEYS = ['suggestOn', 'headsOn', 'blastOn', 'confirmOn', 'trackOn', 'inferOn'];
 let lastSavedPrefs = '';
 
 async function loadPrefs($) {
@@ -422,8 +432,24 @@ async function hudCommand($, e) {
 
     if (verb === 'plan') {
         return {
-            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan, tracking: state.trackOn }).join('\n'),
+            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan, tracking: state.trackOn,
+                estimate: { on: state.inferOn, steps: state.est ? state.est.steps.length : 0, done: state.est ? state.est.steps.filter((s) => s.s === 'done').length : 0 } }).join('\n'),
         };
+    }
+
+    if (verb === 'estimate') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off' || how === 'on') {
+            state.inferOn = how === 'on';
+            if (!state.inferOn) { state.est = null; state.estPlan = null; state.estItems = []; }
+            $.ui.invalidate('ui.render');
+            return {
+                text: state.inferOn
+                    ? 'Estimated plan on. When Claude keeps no task list, ' + shortModel(opts.fastModel) + ' works a plan out from the work every few minutes of a long job. The bar shows it with a tilde.'
+                    : 'Estimated plan off. The bar shows only a task list Claude writes itself.',
+            };
+        }
+        return { text: 'Estimated plan is ' + (state.inferOn ? 'on' : 'off') + '. Use /hud estimate on or /hud estimate off.' };
     }
 
     if (verb === 'track') {
@@ -547,6 +573,7 @@ async function hudCommand($, e) {
     lines.push('  /hud panel [off]         the desktop sidebar: open it, or put the strip back');
     lines.push('  /hud plan                what the progress bar has seen, and why it is or is not showing');
     lines.push('  /hud track on | off      ask Claude to keep a task list for long jobs, so the bar can show');
+    lines.push('  /hud estimate on | off   work a plan out from the work itself when Claude keeps none');
     lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
     lines.push('  /hud blast on | off      measure a destructive command before running it');
     lines.push('  /hud agents              every subagent this session has run');
@@ -623,6 +650,7 @@ const SWITCHES = [
     { key: 'blast', field: 'blastOn', label: 'Blast radius', hint: 'measure a destructive command first' },
     { key: 'confirm', field: 'confirmOn', label: 'Ask near the limit', hint: 'once per window, when it is nearly gone' },
     { key: 'track', field: 'trackOn', label: 'Plan tracking', hint: 'ask Claude to keep a task list for long jobs' },
+    { key: 'estimate', field: 'inferOn', label: 'Estimated plan', hint: 'work a plan out when Claude keeps none' },
 ];
 
 /**
@@ -699,6 +727,63 @@ async function restorePlan($) {
     $.ui.invalidate('ui.render');
 }
 
+/**
+ * The plan to draw: Claude's own when there is one, otherwise the estimate.
+ *
+ * A plan Claude wrote always wins. The estimate is only ever a stand-in for
+ * one that does not exist, and is marked so, because a guess drawn as a fact
+ * is how a bar comes to be distrusted.
+ */
+function shownPlan() {
+    if (worthShowing(state.plan)) return { plan: state.plan, items: state.planItems, estimated: false };
+    if (state.inferOn && state.estPlan && worthShowing(state.estPlan)) {
+        return { plan: state.estPlan, items: state.estItems, estimated: true };
+    }
+    return { plan: null, items: [], estimated: false };
+}
+
+/**
+ * Work a plan out from the work itself, once.
+ *
+ * Top level because it is handed the API, and never awaited by the hooks that
+ * start it: a tool call must not wait on a model. It never throws, and leaves
+ * what is on screen alone when the answer cannot be read.
+ */
+async function inferPlan($) {
+    if (state.infer.busy) return;
+    state.infer.busy = true;
+    state.infer.lastAt = Date.now();
+    state.infer.calls = 0;
+    try {
+        const ask = buildPlanPrompt(await $.session.messages(), state.est);
+        if (!ask) return;
+        const reply = await $.model.complete({ model: opts.fastModel, prompt: ask, maxTokens: 500 });
+        const raw = reply && reply.isAnswered === false ? '' : reply;
+        // The model says there is no job: whatever was estimated is over.
+        if (isNone(raw)) {
+            state.est = null;
+            state.estPlan = null;
+            state.estItems = [];
+            $.ui.invalidate('ui.render');
+            return;
+        }
+        const parsed = parsePlan(raw);
+        // Unreadable is not the same as none: the last good estimate stays.
+        if (!parsed) return;
+        const merged = stabilise(state.est, parsed);
+        const items = toTodos(merged);
+        const plan = progressOf(items);
+        state.est = merged;
+        state.estPlan = plan ? { ...plan, estimated: true } : null;
+        state.estItems = plan ? items : [];
+        $.ui.invalidate('ui.render');
+    } catch {
+        // An estimate is a convenience, and a failed request is not worth a word.
+    } finally {
+        state.infer.busy = false;
+    }
+}
+
 /** Everything the sidebar draws, gathered from state that is already there. */
 function panelData($, model) {
     const readings = readingsFor({
@@ -709,6 +794,7 @@ function panelData($, model) {
     const agents = visible(state.agents);
     const session = sessionOf(state.lastUsage);
     const now = Date.now();
+    const shown = shownPlan();
     return {
         model,
         pinned: state.pinned,
@@ -726,8 +812,9 @@ function panelData($, model) {
             age: session.startedAt === null ? '' : spanText(now - session.startedAt),
         },
         stats: statsView(state.stats),
-        plan: worthShowing(state.plan) ? state.plan : null,
-        planItems: state.planItems,
+        plan: shown.plan,
+        planItems: shown.items,
+        planEstimated: shown.estimated,
         agents,
         agentShares: shares(agents),
         headsNote: state.headsNote,
@@ -804,7 +891,7 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|track|agents]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|track|estimate|agents]',
         });
 
         // What you switched off last time stays off.
@@ -815,6 +902,10 @@ export function register(on) {
         // not after the next task call.
         // A new, cleared or resumed session keeps its own tally.
         state.remind = { calls: 0, reminders: 0 };
+        state.est = null;
+        state.estPlan = null;
+        state.estItems = [];
+        state.infer = { calls: 0, turnCalls: 0, lastAt: 0, busy: false };
         state.stats = emptyStats();
         state.guardSeen = 0;
         state.guards = [];
@@ -964,6 +1055,23 @@ export function register(on) {
         }
         if (e.agentId || e.isAborted) return result;
 
+        // A finished estimate is a receipt like any other, and a turn that did
+        // real work is a good moment to look again. Not waited for.
+        if (state.estPlan && state.estPlan.complete) {
+            state.est = null;
+            state.estPlan = null;
+            state.estItems = [];
+        }
+        const worked = state.infer.turnCalls;
+        state.infer.turnCalls = 0;
+        if (inferDue({
+            on: state.inferOn, planned: worthShowing(state.plan), busy: state.infer.busy,
+            calls: 0, turnToolCalls: worked, turnEnded: true,
+            lastAt: state.infer.lastAt, now: Date.now(),
+        })) {
+            void inferPlan($);
+        }
+
         state.headsSinceLast += 1;
         const toolCalls = state.turnToolCalls;
         state.turnToolCalls = 0;
@@ -1088,7 +1196,19 @@ export function register(on) {
             if (e.agentId || !result || result.deny || result.isError) return result;
             if (e.tool === 'ToolSearch' || e.tool === 'TaskCreate' || e.tool === 'TaskUpdate'
                 || e.tool === 'TaskList' || e.tool === 'TodoWrite') return result;
-            const step = reminderStep(state.remind, { on: state.trackOn, planned: worthShowing(state.plan) });
+            // A stretch of work with no plan of Claude's own is the moment to
+            // work one out. Started and not waited for.
+            state.infer.calls += 1;
+            state.infer.turnCalls += 1;
+            if (inferDue({
+                on: state.inferOn, planned: worthShowing(state.plan), busy: state.infer.busy,
+                calls: state.infer.calls, turnToolCalls: 0, turnEnded: false,
+                lastAt: state.infer.lastAt, now: Date.now(),
+            })) {
+                void inferPlan($);
+            }
+            // With a bar showing, even an estimated one, there is nothing to nag about.
+            const step = reminderStep(state.remind, { on: state.trackOn, planned: shownPlan().plan !== null });
             state.remind = step.r;
             if (!step.fire) return result;
             const text = reminderText(state.offered);
@@ -1431,15 +1551,17 @@ export function register(on) {
 
         // The plan first, because it is the thing you are actually watching
         // while a long job runs. It is absent on an ordinary turn.
-        if (!sidebar && worthShowing(state.plan)) {
-            const plan = state.plan;
+        const shown = shownPlan();
+        if (!sidebar && shown.plan) {
+            const plan = shown.plan;
             // savvy-progress's row, on both surfaces: a dot and the task in
             // hand, the bar, "Tasks 4/12", the percentage. The colours are
             // its own too: a soft violet while the work is under way, green
             // once it is finished.
             const color = plan.complete ? PLAN_DONE : PLAN_ACCENT;
             const name = plan.label || 'Plan';
-            const count = 'Tasks ' + countText(plan);
+            // A tilde where the count is a worked-out guess and not a task list.
+            const count = (shown.estimated ? 'Tasks ~' : 'Tasks ') + countText(plan);
             const pct = percentText(plan.percent);
             const columns = (e.props && e.props.bodyColumns)
                 || (e.viewport && e.viewport.columns)

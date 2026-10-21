@@ -242,7 +242,7 @@ export function todosFromTasks(tasks) {
  * `seen` is how many calls of each plan tool have gone past this session;
  * `tracking` is whether Claude is being asked to keep a task list.
  */
-export function planReport({ seen, tasks, plan, tracking }) {
+export function planReport({ seen, tasks, plan, tracking, estimate }) {
     const counts = seen || {};
     const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList']
         .reduce((n, k) => n + (counts[k] || 0), 0);
@@ -255,6 +255,9 @@ export function planReport({ seen, tasks, plan, tracking }) {
         : 'plan: none');
     lines.push('tasks tracked from the task tools: ' + tracked);
     lines.push('plan tracking: ' + (tracking ? 'on, Claude is asked to keep a task list for long jobs' : 'off'));
+    lines.push('estimated plan: ' + (estimate && estimate.on
+        ? (estimate.steps ? 'on, ' + estimate.done + '/' + estimate.steps + ' steps worked out from the work' : 'on, none worked out yet')
+        : 'off'));
     lines.push('plan tool calls seen this session: TaskCreate ' + (counts.TaskCreate || 0)
         + ', TaskUpdate ' + (counts.TaskUpdate || 0)
         + ', TaskList ' + (counts.TaskList || 0)

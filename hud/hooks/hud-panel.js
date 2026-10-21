@@ -328,6 +328,9 @@ function progressCard(ui, data) {
         alt: progressAlt(plan),
         source: planSvg(plan, { width: GAUGE_W }),
     }));
+    if (data.planEstimated) {
+        body.push(sentence(ui, 'p-est', 'Estimated from the work so far, because Claude kept no task list.'));
+    }
 
     const row = (key, mark, markColor, text, active, dimmed) => Box({
         key,
@@ -369,7 +372,7 @@ function progressCard(ui, data) {
         }
     }
 
-    return card(ui, data, 'progress', 'Progress', countText(plan) + '  ' + percentText(plan.percent),
+    return card(ui, data, 'progress', 'Progress', (data.planEstimated ? '~' : '') + countText(plan) + '  ' + percentText(plan.percent),
         plan.complete ? PLAN_DONE : PLAN_ACCENT, body);
 }
 

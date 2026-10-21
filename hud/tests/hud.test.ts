@@ -24,6 +24,8 @@ import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool
 import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
 import { planBar, PLAN_ACCENT, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
 import { planSvg } from '../hooks/hud-svg.js';
+import { buildPlanPrompt, parsePlan, stabilise, toTodos, inferDue, isNone,
+    INFER_EVERY_CALLS, INFER_MIN_GAP_MS, INFER_TURN_TOOL_CALLS } from '../hooks/hud-infer.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
@@ -3819,4 +3821,352 @@ test('a new session starts the count over', async () => {
     for (let i = 0; i < REMIND_AFTER - 1; i += 1) {
         expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
     }
+});
+
+
+// ======================================================= a plan worked out from the work
+//
+// Claude does not always keep a task list, and a model with hours of task-less
+// history ignores both the system prompt and a reminder. So when there is none
+// the cheap model is shown the work and asked for the steps. What is sent is
+// narrow on purpose (no commands, file names only), and what comes back is
+// drawn as the estimate it is.
+
+const asst2 = (text, ...uses) => ({ role: 'assistant', text, toolUses: uses });
+const ask = (text) => ({ role: 'user', text, toolUses: [] });
+
+test('the request names the job, the subagents sent and the files touched', async () => {
+    const prompt = buildPlanPrompt([
+        ask('wire the sidebar, then the tests'),
+        asst2('on it', { tool: 'Agent', input: { description: 'Implement Plan 09 Task 2 isolation suite' } },
+            { tool: 'Edit', input: { file_path: '/home/me/project/src/app.js' } },
+            { tool: 'Skill', input: { skill: 'superpowers:writing-plans' } }),
+    ], null);
+    expect(prompt.includes('wire the sidebar, then the tests')).toBe(true);
+    expect(prompt.includes('Implement Plan 09 Task 2 isolation suite')).toBe(true);
+    expect(prompt.includes('edited: app.js')).toBe(true);
+    expect(prompt.includes('superpowers:writing-plans')).toBe(true);
+});
+
+test('a command is never sent, whatever it carries', async () => {
+    const prompt = buildPlanPrompt([
+        ask('deploy it'),
+        asst2('running', { tool: 'Bash', input: { command: 'curl -H "Authorization: Bearer SECRETTOKEN123" https://x.example' } },
+            { tool: 'Read', input: { file_path: '/etc/shadow-ish/secret.txt' } },
+            { tool: 'WebFetch', input: { url: 'https://private.example/?key=ABC' } }),
+    ], null);
+    expect(prompt.includes('SECRETTOKEN123')).toBe(false);
+    expect(prompt.includes('curl')).toBe(false);
+    expect(prompt.includes('shadow-ish')).toBe(false);
+    expect(prompt.includes('private.example')).toBe(false);
+    // The tools are counted, so the work is still shown as busy.
+    expect(prompt.includes('Bash x1')).toBe(true);
+});
+
+test('a file is named by its last segment only, never its directory', async () => {
+    const prompt = buildPlanPrompt([
+        ask('edit'),
+        asst2('', { tool: 'Write', input: { file_path: 'C:\\Users\\jane\\Secret Client\\notes.md' } },
+            { tool: 'Edit', input: { file_path: '/home/dev/app/docs/plan.md' } }),
+    ], null);
+    expect(prompt.includes('notes.md')).toBe(true);
+    expect(prompt.includes('plan.md')).toBe(true);
+    expect(prompt.includes('Secret Client')).toBe(false);
+    expect(prompt.includes('/home/dev')).toBe(false);
+    expect(prompt.includes('jane')).toBe(false);
+});
+
+test('nothing to go on means no request at all', async () => {
+    expect(buildPlanPrompt([], null)).toBe(null);
+    expect(buildPlanPrompt(undefined, null)).toBe(null);
+    expect(buildPlanPrompt([{ role: 'user', text: '', toolUses: [] }], null)).toBe(null);
+});
+
+test('the engine\'s own wrapper notes are not the person\'s request', async () => {
+    const prompt = buildPlanPrompt([
+        ask('<system-reminder>Attribution for commits goes here</system-reminder> please add the header bar'),
+        asst2('ok', { tool: 'Edit', input: { file_path: 'a.js' } }),
+    ], null);
+    expect(prompt.includes('please add the header bar')).toBe(true);
+    expect(prompt.includes('Attribution for commits')).toBe(false);
+});
+
+test('a subagent hand-back is not mistaken for the request', async () => {
+    const prompt = buildPlanPrompt([
+        ask('build the whole account system'),
+        asst2('dispatching', { tool: 'Agent', input: { description: 'Implement Task 1' } }),
+        ask('Another Claude session sent a message: <agent-message from="x"> report </agent-message>'),
+    ], null);
+    expect(prompt.includes('build the whole account system')).toBe(true);
+    expect(prompt.includes('agent-message')).toBe(false);
+});
+
+test('the list from last time is shown so the same job keeps the same steps', async () => {
+    const prev = { title: 'j', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }] };
+    const prompt = buildPlanPrompt([ask('go'), asst2('x', { tool: 'Agent', input: { description: 'routes' } })], prev);
+    expect(prompt.includes('1. [done] design the schema')).toBe(true);
+    expect(prompt.includes('A step that was done stays done')).toBe(true);
+});
+
+test('only so much is sent, however long the session has been', async () => {
+    const uses = [];
+    for (let i = 0; i < 200; i += 1) uses.push({ tool: 'Agent', input: { description: 'step number ' + i } });
+    const prompt = buildPlanPrompt([ask('x'.repeat(5000)), asst2('y'.repeat(5000), ...uses)], null);
+    expect(prompt.length < 6000).toBe(true);
+    // The most recent work, not the oldest.
+    expect(prompt.includes('step number 199')).toBe(true);
+    expect(prompt.includes('step number 0\n')).toBe(false);
+});
+
+test('a plan is read out of an answer even when the model wraps it in words', async () => {
+    const raw = 'Here you go:\n```json\n{"title":"Account system","steps":[{"t":"schema","s":"done"},{"t":"routes","s":"in_progress"},{"t":"tests","s":"pending"}]}\n```';
+    const plan = parsePlan(raw);
+    expect(plan.title).toBe('Account system');
+    expect(plan.steps.length).toBe(3);
+    // The other spellings of a state are understood.
+    expect(plan.steps[1].s).toBe('doing');
+    expect(plan.steps[2].s).toBe('todo');
+});
+
+test('NONE, nonsense and a list too short to be a plan are all refused', async () => {
+    expect(parsePlan('NONE')).toBe(null);
+    expect(parsePlan('none, it is a question')).toBe(null);
+    expect(parsePlan('')).toBe(null);
+    expect(parsePlan('{"steps": "not a list"}')).toBe(null);
+    expect(parsePlan('{ broken json')).toBe(null);
+    expect(parsePlan('{"title":"t","steps":[{"t":"a","s":"done"},{"t":"b","s":"todo"}]}')).toBe(null);
+    expect(parsePlan(undefined)).toBe(null);
+    expect(isNone('NONE')).toBe(true);
+    expect(isNone('{"steps":[]}')).toBe(false);
+});
+
+test('a step with no name or an unknown state is dropped, not guessed at', async () => {
+    const plan = parsePlan('{"title":"t","steps":[{"t":"a","s":"done"},{"t":"","s":"done"},{"t":"b","s":"maybe"},{"t":"c","s":"todo"},{"t":"d","s":"doing"}]}');
+    expect(plan.steps.map((s) => s.t).join(',')).toBe('a,c,d');
+});
+
+test('a plan is held to a sensible size, and each step to a line', async () => {
+    const many = [];
+    for (let i = 0; i < 30; i += 1) many.push({ t: 'step ' + i + ' ' + 'x'.repeat(200), s: 'todo' });
+    const plan = parsePlan(JSON.stringify({ title: 'big', steps: many }));
+    expect(plan.steps.length).toBe(12);
+    expect(plan.steps.every((s) => s.t.length <= 70)).toBe(true);
+});
+
+test('a step that was done stays done when a later guess is less sure', async () => {
+    const before = { title: 'j', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }] };
+    const after = { title: 'j', steps: [{ t: 'design the schema', s: 'doing' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }, { t: 'deploy', s: 'todo' }] };
+    const merged = stabilise(before, after);
+    expect(merged.steps[0].s).toBe('done');
+    // New steps still arrive.
+    expect(merged.steps.length).toBe(4);
+});
+
+test('a list that shares almost nothing with the old one is a new job and replaces it', async () => {
+    const before = { title: 'a', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'done' }, { t: 'add tests', s: 'done' }] };
+    const after = { title: 'b', steps: [{ t: 'paint the fence', s: 'todo' }, { t: 'buy more paint', s: 'todo' }, { t: 'sand the gate', s: 'todo' }] };
+    const merged = stabilise(before, after);
+    expect(merged.title).toBe('b');
+    expect(merged.steps.every((s) => s.s === 'todo')).toBe(true);
+});
+
+test('one step that happens to match does not drag the new job along', async () => {
+    const before = { title: 'a', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'done' }, { t: 'add tests', s: 'done' }] };
+    const after = { title: 'b', steps: [{ t: 'paint the fence', s: 'todo' }, { t: 'add tests', s: 'todo' }, { t: 'sand the gate', s: 'todo' }] };
+    // One of three shares words with the old list: a coincidence, not the same job.
+    expect(stabilise(before, after).steps[1].s).toBe('todo');
+});
+
+test('with no earlier list the new one is taken as it is', async () => {
+    const next = { title: 'x', steps: [{ t: 'a', s: 'todo' }, { t: 'b', s: 'todo' }, { t: 'c', s: 'todo' }] };
+    expect(stabilise(null, next)).toBe(next);
+    expect(stabilise(next, null)).toBe(null);
+});
+
+test('the steps become the todo list the bar already reads, and a bar from them', async () => {
+    const todos = toTodos({ steps: [{ t: 'a', s: 'done' }, { t: 'b', s: 'doing' }, { t: 'c', s: 'todo' }, { t: 'd', s: 'todo' }] });
+    expect(todos.map((t) => t.status).join(',')).toBe('completed,in_progress,pending,pending');
+    const plan = progressOf(todos);
+    expect(plan.total).toBe(4);
+    expect(plan.done).toBe(1);
+    expect(plan.label).toBe('b');
+});
+
+const dueArgs = (over) => ({ on: true, planned: false, busy: false, calls: 12, turnToolCalls: 0, turnEnded: false, lastAt: 0, now: 1e9, ...over });
+
+test('it looks after a stretch of work, and not before', async () => {
+    expect(inferDue(dueArgs({ calls: INFER_EVERY_CALLS - 1 }))).toBe(false);
+    expect(inferDue(dueArgs({ calls: INFER_EVERY_CALLS }))).toBe(true);
+});
+
+test('never with a plan of Claude\'s own, never while one is running, never when switched off', async () => {
+    expect(inferDue(dueArgs({ planned: true }))).toBe(false);
+    expect(inferDue(dueArgs({ busy: true }))).toBe(false);
+    expect(inferDue(dueArgs({ on: false }))).toBe(false);
+});
+
+test('and never more than once a minute', async () => {
+    expect(inferDue(dueArgs({ lastAt: 1e9 - INFER_MIN_GAP_MS + 1 }))).toBe(false);
+    expect(inferDue(dueArgs({ lastAt: 1e9 - INFER_MIN_GAP_MS }))).toBe(true);
+});
+
+test('a finished turn is a moment to look, if it did real work', async () => {
+    expect(inferDue(dueArgs({ calls: 0, turnEnded: true, turnToolCalls: INFER_TURN_TOOL_CALLS }))).toBe(true);
+    expect(inferDue(dueArgs({ calls: 0, turnEnded: true, turnToolCalls: INFER_TURN_TOOL_CALLS - 1 }))).toBe(false);
+});
+
+// ---- through the real hooks
+
+const workMessages = () => [
+    ask('finish the account system'),
+    asst2('on it', { tool: 'Agent', input: { description: 'Implement Task 1 schema' } },
+        { tool: 'Agent', input: { description: 'Implement Task 2 routes' } }),
+];
+const PLAN_ANSWER = JSON.stringify({ title: 'Accounts', steps: [
+    { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'doing' }, { t: 'Task 3 tests', s: 'todo' }, { t: 'Task 4 deploy', s: 'todo' },
+] });
+
+async function estimateSession(answer) {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    h.ctx.session.messages = async () => workMessages();
+    h.asked = [];
+    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: answer }; } };
+    await h.say('estimate on');
+    await h.say('track on');
+    await h.start();
+    // start() replays the transcript for a plan, which finds none here.
+    return h;
+}
+const callsOf = async (h, n) => {
+    const hook = callHook(h);
+    for (let i = 0; i < n; i += 1) await hook.handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
+    await sleep2(30);
+};
+const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('after a stretch of work with no plan the bar appears, marked as an estimate', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(h.asked.length).toBe(1);
+    expect(h.asked[0].model.length > 0).toBe(true);
+    const tree = await h.band('terminal');
+    const row = find(tree, 'hud-progress');
+    expect(!!row).toBe(true);
+    // A tilde before the count: a guess, drawn as a guess.
+    expect(textsOf(row).includes('Tasks ~1/4')).toBe(true);
+});
+
+test('the request goes to the cheap model and carries no command', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(h.asked[0].prompt.includes('Implement Task 2 routes')).toBe(true);
+    expect(h.asked[0].prompt.includes('ls')).toBe(false);
+});
+
+test('a plan Claude writes itself replaces the estimate', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    const create = hookOf(h, 'tool.call', (m) => m && m.tool === 'TaskCreate');
+    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'real one' }, async () => ({ result: { task: { id: 'e1', subject: 'real one' } } }));
+    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'real two' }, async () => ({ result: { task: { id: 'e2', subject: 'real two' } } }));
+    const row = find(await h.band('terminal'), 'hud-progress');
+    expect(textsOf(row).includes('Tasks ~')).toBe(false);
+    expect(textsOf(row).includes('Tasks 0/2')).toBe(true);
+});
+
+test('a model that says there is no job clears the estimate', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+    // A minute later, with the work over, it says so.
+    h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'NONE' }) };
+    const realNow = Date.now;
+    Date.now = () => realNow() + 120000;
+    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+});
+
+test('an answer that cannot be read leaves the last good estimate alone', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'I am not sure what you mean' }) };
+    const realNow = Date.now;
+    Date.now = () => realNow() + 120000;
+    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+});
+
+test('a failed or refused request costs nothing and shows nothing', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    h.ctx.model = { complete: async () => { throw new Error('offline'); } };
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'api-error' }) };
+    const realNow = Date.now;
+    Date.now = () => realNow() + 120000;
+    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+});
+
+test('with the estimate switched off nothing is asked and nothing is drawn', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await h.say('estimate off');
+    await callsOf(h, INFER_EVERY_CALLS * 2);
+    expect(h.asked.length).toBe(0);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+    await h.say('estimate on');
+});
+
+test('a subagent\'s calls do not start a look', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    const hook = callHook(h);
+    for (let i = 0; i < INFER_EVERY_CALLS * 2; i += 1) await hook.handler(h.ctx, { tool: 'Bash', agentId: 'sub-1' }, ok());
+    await sleep2(30);
+    expect(h.asked.length).toBe(0);
+});
+
+test('one look at a time, however fast the calls come', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    let release = null;
+    let started = 0;
+    h.ctx.model = { complete: () => new Promise((resolve) => { started += 1; release = () => resolve({ isAnswered: true, text: PLAN_ANSWER }); }) };
+    const hook = callHook(h);
+    for (let i = 0; i < INFER_EVERY_CALLS * 3; i += 1) await hook.handler(h.ctx, { tool: 'Bash' }, ok());
+    await sleep2(30);
+    expect(started).toBe(1);
+    release();
+    await sleep2(30);
+});
+
+test('the estimate shows in the sidebar with its tilde and a note saying why', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.ui.resolve = () => withSelect;
+    h.ctx.session.messages = async () => workMessages();
+    h.ctx.model = { complete: async () => ({ isAnswered: true, text: PLAN_ANSWER }) };
+    await h.say('estimate on');
+    await h.start();
+    await callsOf(h, INFER_EVERY_CALLS);
+    const tree = await h.pane('desktop');
+    expect(hasKey(tree, 'card-progress')).toBe(true);
+    expect(textsOf(find(tree, 'card-progress')).includes('~1/4')).toBe(true);
+    expect(hasKey(tree, 'p-est')).toBe(true);
+});
+
+test('/hud estimate says what it did, and /hud plan says where the estimate stands', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    expect((await h.say('estimate off')).text.includes('Estimated plan off')).toBe(true);
+    expect((await h.say('estimate on')).text.includes('Estimated plan on')).toBe(true);
+    expect((await h.say('estimate')).text.includes('Estimated plan is on')).toBe(true);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect((await h.say('plan')).text.includes('estimated plan: on, 1/4 steps')).toBe(true);
+});
+
+test('the estimate is a switch like the others, and is kept for next time', async () => {
+    const saved = {};
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    h.ctx.store = { get: async (k) => saved[k], set: async (k, v) => { saved[k] = v; } };
+    await h.say('estimate off');
+    expect(saved.prefs.inferOn).toBe(false);
+    await h.say('estimate on');
+    expect(saved.prefs.inferOn).toBe(true);
 });
