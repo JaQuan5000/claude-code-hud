@@ -10,8 +10,12 @@ A **Claude Code mod** that cuts what a session costs and shows you where you sta
 - **Measures a destructive command before it runs.** `rm -rf build` tells you it is 1,240 files first.
 
 ```
-sonnet 5.5 auto │ Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
+ HUD  sonnet 5.5 · auto · base work                                     session resets in 56m 
+● Wiring the sidebar     ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
+Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
 ```
+
+The first line is the [header bar](#the-terminal-header). The second is the progress bar, and appears only while Claude is working through a plan.
 
 In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
 
@@ -26,6 +30,12 @@ Three things are going on in the terminal bar, and each earned its place:
 The moment you pick a model yourself with `/model`, routing stands down and the badge reads `pin`. It will not override your choice on the next message.
 
 In a narrow window it loses detail before it loses data: the bars shrink to eight, six, five and four cells before any reading is dropped, and the reset times go before a whole window does. The model is never dropped. It never wraps.
+
+## The terminal header
+
+A long reply ends on the line directly above the HUD, and with nothing between them the strip reads as the reply's last sentence. In the terminal the HUD now opens with a full-width header bar: a solid violet **HUD** badge, the model and whether it is `auto`, `pinned` or `manual`, why it was chosen, and on the right how long until the window that resets first does ("session resets in 56m").
+
+The band carries its own colours, a dark band with light text, so it reads the same on a light terminal as on a dark one instead of depending on which you use. The model is said once, in the header, and the strip beneath it no longer repeats it. In a narrow terminal the reset on the right goes first, then the reason, and the model and badge always stay. A terminal that is not UTF-8 gets the same bar in plain characters. The desktop app does not draw it: it has its own look, and its sidebar.
 
 ## Install
 
@@ -188,7 +198,9 @@ A restarted or resumed session finds its plan again. The mod reads the task call
 
 Claude Code places its task tools (`TaskCreate`, `TaskUpdate`) behind ToolSearch, so a model has to go and fetch them before it can write a task, and in a long plan-driven session it often never does. That is how a whole session can go by without a single task being written, and so without a bar.
 
-So the mod adds one short note to the system prompt, after the engine's own sections: for a request of three or more steps, or a written plan being carried out, keep a task list (loading the task tools first if they are not loaded), tick each step as it is accepted, and keep it in the main conversation even when the steps go to subagents. It says nothing for a question or a small edit. It is the same words on every request, so the prompt cache pays for it once, and it makes no request of its own and sends nothing anywhere. `/hud track on` / `off` switches it, and with it off the bar shows only when Claude keeps a task list unprompted. A job already under way may need asking directly ("keep a task list for the rest of this"), since the note applies from the next request.
+So the mod adds one short note to the system prompt, after the engine's own sections: for a request of three or more steps, or a written plan being carried out, keep a task list (loading the task tools first if they are not loaded), tick each step as it is accepted, and keep it in the main conversation even when the steps go to subagents. It says nothing for a question or a small edit. It is the same words on every request, so the prompt cache pays for it once, and it makes no request of its own and sends nothing anywhere. `/hud track on` / `off` switches it and the reminder below, and with it off the bar shows only when Claude keeps a task list unprompted. A job already under way may need asking directly ("keep a task list for the rest of this"), since the note applies from the next request.
+
+**A reminder in the middle of a long job.** The note in the system prompt is enough for a new session and not for one that has been working for hours, whose own history of hundreds of calls with no task list in them outweighs a paragraph at the top. So when eight tool calls in a row have gone by with no plan, the mod attaches one sentence to the next tool result, where the model reads it as part of the work: no task list exists, so the bar the person is watching is empty; write at least three separate tasks, one per step, and tick them as they finish. It says so at most four times for one job, forty calls apart, and never once a plan exists. It never changes a result and is never shown to you. Tried against a real session resumed with a long task-less history: without it the model made no tasks, with it the model wrote three on the next step.
 
 Plan tracking is a prompt-level feature, so it does not run where an organization manages Claude Code and restricts plugins from changing prompts; there the bar still works for any plan Claude writes.
 
@@ -359,7 +371,7 @@ $.ui.ask            $.ui.close          $.ui.invalidate     $.ui.open
 $.ui.panes          $.ui.resolve
 ```
 
-No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds five on/off switches (`suggest`, `know`, `blast`, `confirm` and `track`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. One hook changes what the model is given and nothing else: it adds the plan-tracking note to the system prompt. It is fixed text and goes with `/hud track off`. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
+No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds five on/off switches (`suggest`, `know`, `blast`, `confirm` and `track`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. Two hooks change what the model is given and nothing else: one adds the plan-tracking note to the system prompt, and one attaches the mid-job reminder to a tool result. Both are fixed text, both go with `/hud track off`, and neither sends anything anywhere. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
 
 ## What it does not do
 

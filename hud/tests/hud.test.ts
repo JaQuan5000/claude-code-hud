@@ -19,9 +19,10 @@ import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, descr
 import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
 import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport,
-    replayPlan, trackingNudge, TRACK_SECTION } from '../hooks/hud-progress.js';
+    replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText,
+    REMIND_AFTER, REMIND_EVERY, REMIND_MAX } from '../hooks/hud-progress.js';
 import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
-import { planBar, PLAN_ACCENT, PLAN_DONE } from '../hooks/hud-format.js';
+import { planBar, PLAN_ACCENT, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
 import { planSvg } from '../hooks/hud-svg.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
@@ -3457,4 +3458,365 @@ test('it tells Claude that the person is watching a bar, and to skip small thing
     const text = trackingNudge(['TaskCreate', 'TaskUpdate']);
     expect(text.includes('progress bar')).toBe(true);
     expect(text.includes('single small edits')).toBe(true);
+});
+
+
+// ======================================================= the terminal's header bar
+//
+// A long reply ends on the line above the HUD, and with nothing between them
+// the strip reads as the reply's last sentence. The header bar is a full-width
+// band that opens the HUD: a badge, the model and how it was chosen on the
+// left, the next reset on the right.
+
+const HNOW = Date.UTC(2026, 9, 21, 12, 0, 0);
+const hstate = (over) => ({
+    model: 'fable 5.1', pinned: false, routing: true, reason: 'base work',
+    rateLimits: [
+        { kind: 'five_hour', percentUsed: 58, resetsAt: Math.floor(HNOW / 1000) + 56 * 60 },
+        { kind: 'seven_day', percentUsed: 15, resetsAt: Math.floor(HNOW / 1000) + 32 * 3600 },
+    ],
+    ...over,
+});
+const leftText = (h) => h.left.map((p) => p.text).join('');
+
+test('the header opens with a solid badge, the model and how it was chosen', async () => {
+    const h = headerBar(hstate(), 110, { now: HNOW });
+    expect(h.left[0].text).toBe(' HUD ');
+    expect(h.left[0].bg).toBe(BADGE_BG);
+    expect(leftText(h).includes('fable 5.1')).toBe(true);
+    expect(leftText(h).includes('auto')).toBe(true);
+});
+
+test('a pinned model says pinned and is amber, and a manual one says manual', async () => {
+    const pinned = headerBar(hstate({ pinned: true }), 110, { now: HNOW });
+    expect(leftText(pinned).includes('pinned')).toBe(true);
+    expect(pinned.left.find((p) => p.text === 'fable 5.1').color).toBe(BAND_AMBER);
+    const manual = headerBar(hstate({ routing: false }), 110, { now: HNOW });
+    expect(leftText(manual).includes('manual')).toBe(true);
+    expect(manual.left.find((p) => p.text === 'fable 5.1').color).toBe(BAND_CYAN);
+});
+
+test('the right side is the window that resets first, in words', async () => {
+    expect(headerBar(hstate(), 110, { now: HNOW }).right).toBe('session resets in 56m ');
+    // The week is the sooner one here.
+    const week = hstate({ rateLimits: [
+        { kind: 'five_hour', percentUsed: 5, resetsAt: Math.floor(HNOW / 1000) + 4 * 3600 },
+        { kind: 'seven_day', percentUsed: 5, resetsAt: Math.floor(HNOW / 1000) + 90 * 60 },
+    ] });
+    expect(headerBar(week, 110, { now: HNOW }).right).toBe('week resets in 1h30m ');
+});
+
+test('a reset already past, or a spend limit, is never the one named', async () => {
+    const odd = hstate({ rateLimits: [
+        { kind: 'five_hour', percentUsed: 5, resetsAt: Math.floor(HNOW / 1000) - 600 },
+        { kind: 'spend_limit', percentUsed: 5, resetsAt: Math.floor(HNOW / 1000) + 60 },
+        { kind: 'seven_day', percentUsed: 5, resetsAt: Math.floor(HNOW / 1000) + 3 * 3600 },
+    ] });
+    expect(headerBar(odd, 110, { now: HNOW }).right).toBe('week resets in 3h ');
+    expect(headerBar(hstate({ rateLimits: [] }), 110, { now: HNOW }).right).toBe('');
+});
+
+test('a narrow terminal drops the reset before anything on the left', async () => {
+    const wide = headerBar(hstate(), HEADER_WIDE, { now: HNOW });
+    const narrow = headerBar(hstate(), HEADER_WIDE - 1, { now: HNOW });
+    expect(wide.right === '').toBe(false);
+    expect(narrow.right).toBe('');
+    expect(leftText(narrow).includes('fable 5.1')).toBe(true);
+});
+
+test('the reason is shown when there is room and cut with an ellipsis when there is not', async () => {
+    const long = hstate({ reason: 'planning work, held at sonnet 5.5 to spare the five-hour window' });
+    expect(leftText(headerBar(long, 110, { now: HNOW })).includes('planning work')).toBe(true);
+    const tight = headerBar(long, 60, { now: HNOW });
+    expect(leftText(tight).endsWith('…')).toBe(true);
+    expect(leftText(tight).includes('five-hour window')).toBe(false);
+});
+
+test('with no room for a reason it is left out whole rather than shown as a stub', async () => {
+    const h = headerBar(hstate({ reason: 'base work' }), 30, { now: HNOW });
+    // Exactly the badge, the model and how it was chosen, and nothing after.
+    expect(leftText(h)).toBe(' HUD  fable 5.1 · auto');
+});
+
+test('the header never runs past the terminal, at any width it can fit in', async () => {
+    // Below 24 columns the badge and the model alone are wider than the
+    // terminal, and the row is cut by the layout rather than by this.
+    for (let cols = 24; cols <= 160; cols += 1) {
+        const h = headerBar(hstate({ reason: 'planning work, held at sonnet 5.5 to spare the window' }), cols, { now: HNOW });
+        const used = leftText(h).length + h.right.length;
+        expect(used <= cols).toBe(true);
+    }
+});
+
+test('a terminal that is not UTF-8 gets a header of plain characters', async () => {
+    const h = headerBar(hstate({ reason: 'planning work, held at sonnet 5.5 to spare the five-hour window' }), 60, { ascii: true, now: HNOW });
+    const all = leftText(h) + h.right;
+    expect(/^[\x20-\x7e]*$/.test(all)).toBe(true);
+    expect(all.includes('...')).toBe(true);
+});
+
+test('the strip under the header does not say the model a second time', async () => {
+    const st = { ...hstate(), contextPercent: 41 };
+    const withModel = layout(st, 110, {}).map((p) => p.text).join('');
+    const without = layout(st, 110, { withModel: false }).map((p) => p.text).join('');
+    expect(withModel.includes('fable 5.1')).toBe(true);
+    expect(without.includes('fable 5.1')).toBe(false);
+    expect(without.includes('Ctx')).toBe(true);
+    expect(without.includes('Session')).toBe(true);
+});
+
+test('a strip with no model still fits and still sheds the way it did', async () => {
+    const st = { ...hstate(), contextPercent: 41 };
+    for (let cols = 30; cols <= 120; cols += 10) {
+        const pieces = layout(st, cols, { withModel: false });
+        expect(pieces.map((p) => p.text).join('').length <= Math.max(cols, 1)).toBe(true);
+    }
+});
+
+// ---- through the real band
+
+async function terminalSession() {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    h.ctx.session.messages = async () => [];
+    await h.start();
+    return h;
+}
+
+test('on the terminal the header is the first row of the HUD, on its own band', async () => {
+    const h = await terminalSession();
+    const tree = await h.band('terminal');
+    const head = find(tree, 'hud-head');
+    expect(!!head).toBe(true);
+    expect(head.backgroundColor).toBe(BAND_BG);
+    expect(head.justifyContent).toBe('space-between');
+    // First, so a long reply above cannot be read as running into the strip.
+    const rows = tree.type === 'Box' && tree.key === 'hud-head' ? [tree] : tree.children;
+    expect(rows[0].key).toBe('hud-head');
+    expect(textsOf(head).includes('HUD')).toBe(true);
+});
+
+test('the model appears once on the terminal, in the header and not again in the strip', async () => {
+    const h = await terminalSession();
+    const tree = await h.band('terminal');
+    const all = textsOf(tree);
+    const hits = all.split('opus 5.5').length - 1;
+    expect(hits).toBe(1);
+});
+
+test('the badge is drawn on the violet, and the band text carries its own colour', async () => {
+    const h = await terminalSession();
+    const head = find(await h.band('terminal'), 'hud-head');
+    let badge = null;
+    let plain = null;
+    walk(head, (n) => {
+        if (n.type !== 'Text') return;
+        if ((n.children || []).join('') === ' HUD ') badge = n;
+        else if (!plain && n.key && n.key.startsWith('hl') && n !== badge) plain = n;
+    });
+    expect(badge.backgroundColor).toBe(BADGE_BG);
+    expect(badge.bold).toBe(true);
+    // Self-contained: never the terminal's own default, which could be dark on dark.
+    expect(typeof plain.color).toBe('string');
+});
+
+test('the desktop strip has no header, since it has its own look', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: false });
+    const tree = await h.band('desktop');
+    expect(hasKey(tree, 'hud-head')).toBe(false);
+});
+
+// ======================================================= the mid-job reminder
+
+test('nothing is said until a job has run a while with no plan', async () => {
+    let r = { calls: 0, reminders: 0 };
+    for (let i = 1; i < REMIND_AFTER; i += 1) {
+        const step = reminderStep(r, { on: true, planned: false });
+        expect(step.fire).toBe(false);
+        r = step.r;
+    }
+    expect(reminderStep(r, { on: true, planned: false }).fire).toBe(true);
+});
+
+test('after speaking it waits a long while, and asks only so many times', async () => {
+    let r = { calls: 0, reminders: 0 };
+    let fired = 0;
+    let gaps = [];
+    let since = 0;
+    for (let i = 0; i < 500; i += 1) {
+        const step = reminderStep(r, { on: true, planned: false });
+        since += 1;
+        if (step.fire) { fired += 1; gaps.push(since); since = 0; }
+        r = step.r;
+    }
+    expect(fired).toBe(REMIND_MAX);
+    expect(gaps[0]).toBe(REMIND_AFTER);
+    expect(gaps[1]).toBe(REMIND_EVERY);
+});
+
+test('a job with a plan is never reminded, and counting starts over for the next one', async () => {
+    let r = { calls: 7, reminders: 2 };
+    const planned = reminderStep(r, { on: true, planned: true });
+    expect(planned.fire).toBe(false);
+    expect(planned.r.calls).toBe(0);
+    expect(planned.r.reminders).toBe(0);
+});
+
+test('with the switch off it says nothing and keeps no count', async () => {
+    const step = reminderStep({ calls: 99, reminders: 0 }, { on: false, planned: false });
+    expect(step.fire).toBe(false);
+    expect(step.r.calls).toBe(0);
+});
+
+test('a damaged record is treated as a fresh start', async () => {
+    for (const odd of [undefined, null, 'x', 7]) {
+        const step = reminderStep(odd, { on: true, planned: false });
+        expect(step.fire).toBe(false);
+        expect(step.r.calls).toBe(1);
+    }
+});
+
+test('the reminder says how to load the task tools, and what to do with them', async () => {
+    const text = reminderText(['Bash', 'TaskCreate', 'TaskUpdate', 'ToolSearch']);
+    expect(text.includes('select:TaskCreate,TaskUpdate')).toBe(true);
+    // Several tasks: a plan of one is no bar, and one task for everything is what a model writes unprompted.
+    expect(text.includes('at least three separate tasks')).toBe(true);
+    expect(text.includes('never one task for everything')).toBe(true);
+    expect(text.includes('in_progress')).toBe(true);
+    // The session's own words for what is missing.
+    expect(text.includes('No task list exists')).toBe(true);
+});
+
+test('it asks for TodoWrite where that is the list there is, and for nothing where there is none', async () => {
+    const todos = reminderText(['Bash', 'TodoWrite']);
+    expect(todos.includes('TodoWrite')).toBe(true);
+    expect(todos.includes('TaskCreate')).toBe(false);
+    expect(reminderText(['Bash', 'Read'])).toBe('');
+});
+
+test('when the tools are not known yet it assumes the interactive ones', async () => {
+    expect(reminderText(null).includes('TaskCreate')).toBe(true);
+    expect(reminderText(undefined).includes('TaskCreate')).toBe(true);
+});
+
+test('the reminder contains no long dash', async () => {
+    for (const tools of [null, ['TaskCreate', 'TaskUpdate', 'ToolSearch'], ['TodoWrite']]) {
+        expect(reminderText(tools).includes(String.fromCharCode(8212))).toBe(false);
+    }
+});
+
+// ---- through the real hook
+
+const callHook = (h) => hookOf(h, 'tool.call', (m) => !m);
+const ok = (extra) => async () => ({ ref: 3, text: 'done', result: { stdout: 'x' }, ...extra });
+
+async function jobSession() {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    h.ctx.session.messages = async () => [];
+    await h.say('track on');
+    await h.start();
+    // The tools a real interactive request offers, learned at compose time.
+    await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash', 'TaskCreate', 'TaskUpdate', 'ToolSearch'] }, async () => ({ sections: [] }));
+    return h;
+}
+
+test('the eighth call of a job with no plan carries the reminder beside its result', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    let last = null;
+    for (let i = 0; i < REMIND_AFTER - 1; i += 1) {
+        last = await hook.handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
+        expect(last.context).toBe(undefined);
+    }
+    last = await hook.handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
+    expect(Array.isArray(last.context)).toBe(true);
+    expect(last.context[0].includes('No task list exists')).toBe(true);
+    // The result itself is passed on untouched.
+    expect(last.ref).toBe(3);
+    expect(last.text).toBe('done');
+    expect(last.result.stdout).toBe('x');
+});
+
+test('a reminder already on the result is kept, and ours goes after it', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER - 1; i += 1) await hook.handler(h.ctx, { tool: 'Bash' }, ok());
+    const last = await hook.handler(h.ctx, { tool: 'Bash' }, ok({ context: ['from somewhere else'] }));
+    expect(last.context.length).toBe(2);
+    expect(last.context[0]).toBe('from somewhere else');
+});
+
+test('a subagent\'s calls are not the job being watched', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER * 3; i += 1) {
+        const out = await hook.handler(h.ctx, { tool: 'Bash', agentId: 'sub-1' }, ok());
+        expect(out.context).toBe(undefined);
+    }
+});
+
+test('a refused or failed call is not progress and carries nothing', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER * 2; i += 1) {
+        const denied = await hook.handler(h.ctx, { tool: 'Bash' }, async () => ({ deny: 'no' }));
+        expect(denied.context).toBe(undefined);
+        const failed = await hook.handler(h.ctx, { tool: 'Bash' }, async () => ({ isError: true, text: 'boom' }));
+        expect(failed.context).toBe(undefined);
+    }
+});
+
+test('searching for a tool, or using the task tools, does not count as the work', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (const tool of ['ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TodoWrite']) {
+        for (let i = 0; i < REMIND_AFTER * 2; i += 1) {
+            const out = await hook.handler(h.ctx, { tool }, ok());
+            expect(out.context).toBe(undefined);
+        }
+    }
+});
+
+test('with plan tracking off no reminder is ever added', async () => {
+    const h = await jobSession();
+    await h.say('track off');
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER * 3; i += 1) {
+        expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
+    }
+    await h.say('track on');
+});
+
+test('once a plan exists the reminders stop, and a finished one lets the next job start fresh', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER - 2; i += 1) await hook.handler(h.ctx, { tool: 'Bash' }, ok());
+    // Claude writes a plan: two tasks, one under way.
+    const create = hookOf(h, 'tool.call', (m) => m && m.tool === 'TaskCreate');
+    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'one' }, async () => ({ result: { task: { id: 'r1', subject: 'one' } } }));
+    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'two' }, async () => ({ result: { task: { id: 'r2', subject: 'two' } } }));
+    for (let i = 0; i < REMIND_AFTER * 3; i += 1) {
+        expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
+    }
+});
+
+test('a session with nothing to keep a list with is never reminded', async () => {
+    const h = await sidebarSession({ surfaces: ['terminal'] });
+    h.ctx.session.messages = async () => [];
+    await h.say('track on');
+    await h.start();
+    await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash', 'Read'] }, async () => ({ sections: [] }));
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER * 2; i += 1) {
+        expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
+    }
+});
+
+test('a new session starts the count over', async () => {
+    const h = await jobSession();
+    const hook = callHook(h);
+    for (let i = 0; i < REMIND_AFTER - 2; i += 1) await hook.handler(h.ctx, { tool: 'Bash' }, ok());
+    await h.start();
+    for (let i = 0; i < REMIND_AFTER - 1; i += 1) {
+        expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
+    }
 });

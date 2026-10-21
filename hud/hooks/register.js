@@ -14,7 +14,8 @@
  * that overrode your own `/model` on the next message would be intolerable.
  */
 
-import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText, planBar } from './hud-format.js';
+import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText, planBar,
+    headerBar, BAND_BG, BAND_FG, BAND_DIM as BAND_DIM_COLOR } from './hud-format.js';
 import { gaugeSvg, gaugeAlt, planSvg, progressAlt, PLAN_ACCENT, PLAN_DONE } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
@@ -28,7 +29,7 @@ import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 import { readingsFor, worstLevel, needsClock, leadNote, clockText,
     CALM, WATCH, URGENT } from './hud-focus.js';
 import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks, planReport,
-    replayPlan, trackingNudge, TRACK_SECTION } from './hud-progress.js';
+    replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText } from './hud-progress.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
 import { projectionText } from './hud-pace.js';
@@ -119,6 +120,10 @@ const state = {
      * Claude keeps one on its own.
      */
     trackOn: true,
+    /** Tool calls with no plan, and reminders sent, for the mid-job reminder. */
+    remind: { calls: 0, reminders: 0 },
+    /** The tools the last request offered, learned when the prompt was composed. */
+    offered: null,
     /** What the guard has looked at: how many commands, and the ones it stopped on. */
     guardSeen: 0,
     guards: [],
@@ -809,6 +814,7 @@ export function register(on) {
         // session's task list carries on. Read it back so the bar is there now,
         // not after the next task call.
         // A new, cleared or resumed session keeps its own tally.
+        state.remind = { calls: 0, reminders: 0 };
         state.stats = emptyStats();
         state.guardSeen = 0;
         state.guards = [];
@@ -1062,10 +1068,36 @@ export function register(on) {
     // the note says how to load them instead.
     on('prompt.compose', async ($, e, next) => {
         const out = await next(e);
+        if (Array.isArray(e.tools)) state.offered = e.tools.slice();
         if (!state.trackOn || !out || !Array.isArray(out.sections)) return out;
         const text = trackingNudge(e.tools);
         if (!text || out.sections.some((section) => section.id === TRACK_SECTION)) return out;
         return { ...out, sections: [...out.sections, { id: TRACK_SECTION, text, scope: 'session' }] };
+    }).catch(async ($, e, next) => next(e));
+
+    // The reminder. A session that has been working for hours has hundreds
+    // of calls with no task list in them, and the note in the system prompt
+    // cannot outweigh that. This puts one sentence beside a tool result,
+    // in the middle of the work, once the job has run for a while with no
+    // plan; see reminderStep for how often. It never changes the result.
+    on('tool.call', async ($, e, next) => {
+        const result = await next(e);
+        try {
+            // A subagent's work is its own, and a refused or failed call
+            // is not progress.
+            if (e.agentId || !result || result.deny || result.isError) return result;
+            if (e.tool === 'ToolSearch' || e.tool === 'TaskCreate' || e.tool === 'TaskUpdate'
+                || e.tool === 'TaskList' || e.tool === 'TodoWrite') return result;
+            const step = reminderStep(state.remind, { on: state.trackOn, planned: worthShowing(state.plan) });
+            state.remind = step.r;
+            if (!step.fire) return result;
+            const text = reminderText(state.offered);
+            if (!text) return result;
+            return { ...result, context: [...(result.context || []), text] };
+        } catch {
+            // Decoration. Never the reason a tool call fails.
+            return result;
+        }
     }).catch(async ($, e, next) => next(e));
 
     // The desktop app joined the session: give it the sidebar. The terminal's
@@ -1227,6 +1259,7 @@ export function register(on) {
         wantClock($, needsClock(readings));
 
         let strip = null;
+        let header = null;
         if (sidebar) {
             // The sidebar carries the strip, the plan and the agents. Nothing
             // is built here, so a shown sidebar costs the band nothing.
@@ -1349,7 +1382,9 @@ export function register(on) {
             const columns = (e.props && e.props.bodyColumns)
                 || (e.viewport && e.viewport.columns)
                 || 80;
-            const pieces = layout({ ...state, model }, columns, opts);
+            // The header bar says the model, so the strip does not. Both are
+            // drawn here for the terminal alone: the desktop has its own.
+            const pieces = layout({ ...state, model }, columns, { ...opts, withModel: false });
             strip = Box({
                 flexDirection: 'row',
                 children: pieces.map((p, i) => Text({
@@ -1359,9 +1394,40 @@ export function register(on) {
                     children: [p.text],
                 })),
             });
+
+            const head = headerBar({ ...state, model }, columns, opts);
+            header = Box({
+                key: 'hud-head',
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                backgroundColor: BAND_BG,
+                children: [
+                    Box({
+                        key: 'hh-l',
+                        flexDirection: 'row',
+                        flexShrink: 1,
+                        minWidth: 0,
+                        children: head.left.map((p, i) => Text({
+                            key: 'hl' + i,
+                            color: p.color || BAND_FG,
+                            backgroundColor: p.bg,
+                            bold: !!p.bold,
+                            wrap: 'truncate',
+                            children: [p.text],
+                        })),
+                    }),
+                    head.right
+                        ? Text({ key: 'hh-r', color: BAND_DIM_COLOR, wrap: 'truncate', children: [head.right] })
+                        : null,
+                ].filter(Boolean),
+            });
         }
 
         const rows = [];
+
+        // The terminal's header bar opens the HUD, so a long reply above
+        // cannot be read as running into it.
+        if (header) rows.push(header);
 
         // The plan first, because it is the thing you are actually watching
         // while a long job runs. It is absent on an ordinary turn.

@@ -214,15 +214,19 @@ export function buildGroups(state, opts = {}) {
 
     const drawBar = (percent, mark) => barPieces(percent, cells, ascii, mark);
 
-    groups.push({
-        key: 'model',
-        pieces: [
-            { text: modelText(state.model), color: state.pinned ? 'yellow' : 'cyan' },
-            { text: ' ' },
-            { text: badgeText(state.pinned, state.routing), color: state.pinned ? 'yellow' : 'green' },
-        ],
-        extra: [],
-    });
+    // The terminal's header bar says the model itself, so the strip under it
+    // leaves it out rather than saying it twice.
+    if (opts.withModel !== false) {
+        groups.push({
+            key: 'model',
+            pieces: [
+                { text: modelText(state.model), color: state.pinned ? 'yellow' : 'cyan' },
+                { text: ' ' },
+                { text: badgeText(state.pinned, state.routing), color: state.pinned ? 'yellow' : 'green' },
+            ],
+            extra: [],
+        });
+    }
 
     if (typeof state.contextPercent === 'number') {
         groups.push({
@@ -392,3 +396,76 @@ export function planBar(plan, ascii = false, cells = 16) {
 /** The plan's colours, as savvy-progress has them. Kept here so the terminal needs nothing from the svg file. */
 export const PLAN_ACCENT = '#8f8cf4';
 export const PLAN_DONE = '#5fbf8f';
+
+// ===================================================================== header
+//
+// The terminal's header bar. A long reply ends on the line above the HUD, and
+// with nothing between them the strip reads as the reply's last sentence. The
+// bar is a full-width band with a solid badge, the model and how it was
+// chosen on the left, and the next reset on the right: it separates the two
+// and says the one thing you glance at the HUD for.
+//
+// The band carries its own colours instead of the terminal's: a dark band
+// with light text, so it reads the same on a light terminal as on a dark one
+// rather than depending on which the person happens to use.
+
+export const BAND_BG = '#2b2a28';
+export const BAND_FG = '#d9d7cd';
+export const BAND_DIM = '#8d8a80';
+export const BAND_CYAN = '#6fb6c4';
+export const BAND_AMBER = '#dba54b';
+export const BADGE_BG = '#8f8cf4';
+export const BADGE_FG = '#14131f';
+
+/** Below this the reset time on the right gives way, so the left side keeps its room. */
+export const HEADER_WIDE = 96;
+
+/**
+ * The header bar as pieces.
+ *
+ * Returns `{ left, right }`: `left` is a list of `{ text, color, bg, bold }`
+ * and `right` is a string, drawn at the far edge. The left side is cut to
+ * fit rather than wrapped, and the reason the model was chosen is what goes
+ * first when it does not fit, since it is the least useful part.
+ */
+export function headerBar(state, columns, opts = {}) {
+    const ascii = !!opts.ascii;
+    const now = opts.now || Date.now();
+    const room = Math.max(20, Number(columns) || 80);
+    const dot = ascii ? ' - ' : ' \u00b7 ';
+
+    const how = state.pinned ? 'pinned' : state.routing ? 'auto' : 'manual';
+    const name = String(state.model || '').trim() || '?';
+
+    // The window that resets first, because that is the one that matters next.
+    let right = '';
+    if (room >= HEADER_WIDE) {
+        let soon = null;
+        for (const limit of state.rateLimits || []) {
+            const label = shortKind(limit.kind);
+            const at = Number(limit.resetsAt) * 1000;
+            if (!label || !Number.isFinite(at) || at <= now) continue;
+            if (!soon || at < soon.at) soon = { label, at, resetsAt: limit.resetsAt };
+        }
+        if (soon) right = soon.label.toLowerCase() + ' resets in ' + resetText(soon.resetsAt, now) + ' ';
+    }
+
+    const left = [
+        { text: ' HUD ', color: BADGE_FG, bg: BADGE_BG, bold: true },
+        { text: ' ' },
+        { text: name, color: state.pinned ? BAND_AMBER : BAND_CYAN, bold: true },
+        { text: dot + how, color: BAND_DIM },
+    ];
+
+    const reason = String(state.reason || '').trim();
+    if (reason) {
+        // What is left after the badge, the model, how, the right side and a space.
+        const free = room - width(left) - right.length - dot.length - 1;
+        if (free >= 6) {
+            const cut = ascii ? '...' : '\u2026';
+            const text = reason.length <= free ? reason : reason.slice(0, Math.max(0, free - cut.length)) + cut;
+            left.push({ text: dot + text, color: BAND_DIM });
+        }
+    }
+    return { left, right };
+}

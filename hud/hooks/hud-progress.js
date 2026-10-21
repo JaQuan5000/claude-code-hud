@@ -404,3 +404,67 @@ export function trackingNudge(tools) {
     return lead + 'write the steps with TodoWrite, and write the list again as each step starts and finishes, '
         + 'with exactly one in_progress at a time.' + tail;
 }
+
+// =====================================================================
+// Reminding a model that is already deep in a job
+//
+// The note in the system prompt is enough for a fresh session and not for one
+// that has been working for hours: its own history, hundreds of calls with no
+// task list in them, is a far stronger signal than a paragraph at the top, and
+// the work goes on the way it has been going. A reminder that arrives beside a
+// tool result, in the middle of the work, is read as part of the work. Tried
+// against a real session: with it, a model that had made six calls and no
+// tasks began a task list on the next step; without it, it never did.
+// =====================================================================
+
+/** Main-thread tool calls with no plan before the first reminder. */
+export const REMIND_AFTER = 8;
+/** And how many more before another, if there is still none. */
+export const REMIND_EVERY = 40;
+/** The most reminders for one job. A model that has been asked four times has decided. */
+export const REMIND_MAX = 4;
+
+/**
+ * One tool call's worth of bookkeeping.
+ *
+ * `r` is `{ calls, reminders }`; `planned` is whether a plan is being
+ * tracked; `on` is the switch. Returns the next `r` and whether to speak.
+ * Counting restarts whenever a plan exists, so a job that has one is never
+ * reminded and the next job starts from nothing.
+ */
+export function reminderStep(r, { on, planned }) {
+    const now = r && typeof r === 'object' ? r : { calls: 0, reminders: 0 };
+    if (!on || planned) return { r: { calls: 0, reminders: 0 }, fire: false };
+
+    const calls = now.calls + 1;
+    const due = now.reminders === 0 ? REMIND_AFTER : REMIND_EVERY;
+    if (calls >= due && now.reminders < REMIND_MAX) {
+        return { r: { calls: 0, reminders: now.reminders + 1 }, fire: true };
+    }
+    return { r: { calls, reminders: now.reminders }, fire: false };
+}
+
+/**
+ * The reminder, or '' when the session has nothing to keep a list with.
+ *
+ * `tools` is what the request offers, learned when the prompt was composed;
+ * unknown means assume the task tools, which is what an interactive session has.
+ */
+export function reminderText(tools) {
+    const offered = Array.isArray(tools) ? tools : null;
+    const hasTasks = !offered || (offered.includes('TaskCreate') && offered.includes('TaskUpdate'));
+    const hasTodos = !!offered && offered.includes('TodoWrite');
+    const canLoad = !offered || offered.includes('ToolSearch');
+    if (offered && !hasTasks && !hasTodos && !canLoad) return '';
+
+    const lead = 'No task list exists for the work you are in the middle of, so the progress bar the person is watching '
+        + 'is empty. Break what remains into at least three separate tasks now, one per step or item and never one task for everything: ';
+    if (hasTasks || (canLoad && !hasTodos)) {
+        const load = canLoad
+            ? 'if TaskCreate and TaskUpdate are not loaded yet, load them with ToolSearch (query "select:TaskCreate,TaskUpdate"), then '
+            : '';
+        return lead + load + 'call TaskCreate for each, mark the one you are on in_progress with TaskUpdate, and mark each '
+            + 'completed as it is done.';
+    }
+    return lead + 'write them with TodoWrite, with exactly one in_progress, and write the list again as each one finishes.';
+}
