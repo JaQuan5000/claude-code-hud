@@ -143,7 +143,7 @@ It sends a trimmed slice of the prompt and the answer - the same conversation Cl
 
 ## What the mod sends, in full
 
-Two features make their own model requests, and both are **on by default**. Everything else in the mod is arithmetic on numbers Claude Code already has, and makes no requests at all.
+Two features make their own model requests, and both are **on by default**. Everything else in the mod is arithmetic on numbers Claude Code already has, and makes no requests at all. A third thing, plan tracking, adds a short fixed note to the system prompt of your own requests; it makes no request of its own (see [Plan tracking](#plan-tracking)).
 
 | Feature | When it fires | What it sends | Turn it off |
 |---|---|---|---|
@@ -152,7 +152,7 @@ Two features make their own model requests, and both are **on by default**. Ever
 
 Both go to your own model on your own account - the same conversation, to the same place it already goes - and both are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all.
 
-If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These four switches (`suggest`, `know`, `blast`, `confirm`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
+If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These five switches (`suggest`, `know`, `blast`, `confirm`, `track`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
 
 ## Tuning the routing on real data
 
@@ -168,37 +168,57 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 
 ## The progress bar
 
-While Claude works through a multi-step job, a blue bar shows how far along it is:
+While Claude works through a multi-step job, a progress bar shows how far along it is, drawn the way [savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress) draws it. In the terminal:
 
 ```
-▸ Wiring the panel  [████▒▒······]  4/12  33%
+● Wiring the panel        █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
 ```
 
-The solid blocks are tasks that are finished, and the lighter ones are the task in hand. It is blue on purpose: the green-amber-red bars measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
+Solid blocks are the work finished and the light shade is what is left, in a soft violet while the work is under way and green once it is done. In the desktop app the bar is a picture: a dithered fill that thickens towards its head, a faint layer for the task in hand, a tick where each task still ahead begins, and the count on a pill riding the head of the fill. The colours are deliberately not the quota bars' green-amber-red: those measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
 
 The total comes from Claude's own task list, the plan it writes before it starts and updates as each step lands, so nothing in the bar is estimated. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads both ways Claude keeps that list - the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
 
-If you never see it, run `/hud plan`. It says how many task calls the mod has actually seen this session, whether a plan is being tracked, and which of the usual reasons applies: Claude is not keeping a task list for the job (`/tasks` shows whether it is), the mod was updated but Claude Code has not been restarted since, or the plan is under two tasks or already finished. A short question has no plan, so it has no bar.
+If you never see it, run `/hud plan`. It says how many task calls the mod has actually seen this session, whether a plan is being tracked, and which of the usual reasons applies: Claude is not keeping a task list for the job, or the plan is under two tasks or already finished. A short question has no plan, so it has no bar.
+
+The usual reason is the first. The bar can only count a list Claude writes down, and a long job carried out without one, most often one handed to subagents a step at a time, has nothing to count. That is not a fault in the bar, so the mod does something about it: see [Plan tracking](#plan-tracking).
+
+A restarted or resumed session finds its plan again. The mod reads the task calls back out of the transcript when it starts, so the bar is there straight away instead of after the next task call.
+
+## Plan tracking
+
+Claude Code places its task tools (`TaskCreate`, `TaskUpdate`) behind ToolSearch, so a model has to go and fetch them before it can write a task, and in a long plan-driven session it often never does. That is how a whole session can go by without a single task being written, and so without a bar.
+
+So the mod adds one short note to the system prompt, after the engine's own sections: for a request of three or more steps, or a written plan being carried out, keep a task list (loading the task tools first if they are not loaded), tick each step as it is accepted, and keep it in the main conversation even when the steps go to subagents. It says nothing for a question or a small edit. It is the same words on every request, so the prompt cache pays for it once, and it makes no request of its own and sends nothing anywhere. `/hud track on` / `off` switches it, and with it off the bar shows only when Claude keeps a task list unprompted. A job already under way may need asking directly ("keep a task list for the rest of this"), since the note applies from the next request.
+
+Plan tracking is a prompt-level feature, so it does not run where an organization manages Claude Code and restricts plugins from changing prompts; there the bar still works for any plan Claude writes.
 
 ## The desktop sidebar
 
 In the Claude desktop app the whole HUD lives in a panel on the right, beside the conversation, as a stack of rounded cards in the same style as the app's own (Environment, Context, Outputs, Changes). Each has a title you can press to fold it.
 
+A mod cannot add a card to the app's own stack: the only places it can draw are a panel of its own, the strip above the prompt, and the transcript. So this is a panel of its own, and it is made to hold everything the HUD knows rather than a summary of it.
+
 | Card | What it holds |
 |---|---|
-| **Model** | The model on this turn, whether it is routed (`auto`), pinned or manual, and why it was chosen |
-| **Usage** | Context, Session, Week and any other window, each with a gauge, the time it resets and a pace warning if you are outrunning it |
-| **Progress** | The blue bar, then the task list item by item: the one in hand first, then what is waiting |
+| **Model** | The model on this turn, `auto`, `pinned` or `manual`, why it was chosen, what the session has cost, how long it has run and how many turns it has taken. While pinned, one press hands routing back |
+| **Heads up** | The one thing you may have missed, with a dismiss. Only while there is one |
+| **Usage** | Context (with the token count), Session, Week and any other window: a gauge each, when it resets, and where it is heading at the pace so far ("on track for 60% by reset", or when it will run dry) |
+| **Progress** | The progress bar and the task list: what is in hand, what is waiting, and the last few finished |
 | **Agents** | Each running subagent by name, how long it has run and what it has used |
-| **Routing** | Which model each tier points at, and the last few decisions. Folded to start with |
+| **Next steps** | The follow-ups the last turn offered. One press sends one |
+| **Activity** | Turns, tokens in and out, how much of the input the prompt cache served, and the average and last turn time. Left out until there is a turn |
+| **Routing** | The last few decisions: the tier, the model, and the words that decided it |
+| **Blast radius** | Whether the guard is on, how many commands it checked, and the ones it stopped on with what you chose. The command itself is never kept. Folded to start with |
+| **Models** | A picker for the model behind each of the fast, base and deep tiers. Folded to start with |
+| **Settings** | A switch each for routing, follow-ups, the heads-up, blast radius, asking near the limit and plan tracking. They are the same switches the `/hud` commands flip, and are kept for next time |
 
-A card with nothing to say is left out rather than drawn empty, so with no plan and no agents you see two cards.
+A card with nothing to say is left out rather than drawn empty, so with no plan, no agents and nothing to follow up you see only what there is.
 
-While the panel is showing, the strip above the prompt steps aside, since it would only say everything twice. It comes back by itself whenever the panel is not actually on screen, such as a window too narrow for it, or after you close it, so the numbers are never missing from both places at once. Follow-up suggestions and the heads-up note stay above the prompt, because they are things you press.
+While the panel is showing, the strip above the prompt steps aside, since it would only say everything twice, and the heads-up and the follow-ups move into the panel as cards. All of it comes back above the prompt by itself whenever the panel is not actually on screen, such as a window too narrow for it, or after you close it, so nothing is ever missing from both places at once.
 
 `/hud panel` opens it, and `/hud panel off` closes it and puts the strip back. If you close it with the panel's own close mark it stays closed until you ask for it.
 
-**The terminal is never touched.** The panel is opened only for the desktop app, and the terminal strip, progress bar and agent row are drawn exactly as before.
+**The terminal is never touched.** The panel is opened only for the desktop app, and the terminal strip, progress bar, agent row, heads-up and follow-ups are drawn exactly as before.
 
 ## Watching the subagents
 
@@ -242,7 +262,7 @@ If you would rather the mod could not start processes at all, `/hud blast off` a
 
 ## One thing you may have missed
 
-After a substantial turn, Haiku rereads the recent conversation and looks for a single thing worth raising:
+After a substantial turn, Haiku rereads the recent conversation (the words of your messages and Claude's replies, not tool output) and looks for a single thing worth raising:
 
 ```
 ✦ Heads up · You changed the retry logic but the test still asserts the old timeout.   0: dismiss
@@ -268,6 +288,7 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud confirm on` / `off` | The question near the limit, asked once per window |
 | `/hud panel` / `panel off` | The desktop sidebar: open it, or close it and put the strip back |
 | `/hud plan` | What the progress bar has seen, and why it is or is not showing |
+| `/hud track on` / `off` | Asking Claude to keep a task list for long jobs, so the bar has something to count |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
@@ -298,9 +319,10 @@ Almost nothing, and the one thing that does cost is named here rather than burie
 - **No polling.** The numbers come from `$.session.usage()`, read when Claude Code says a limit moved (`session.measure`) and once at session start.
 - **No model call to route.** The tier comes from a regular expression. Asking a model which model to use would spend a request to save a request, which is the joke this mod would become.
 - **One timer, for one reason.** The reset times are a countdown, which is wrong within a minute if nobody redraws it, so the strip redraws once a minute. That redraw reads numbers already in memory and makes no requests.
-- **One model call, and only for follow-ups.** The suggestions under the strip are written by the cheap model reading the turn that just ended: a few hundred input tokens and a ceiling of 120 out, on Haiku, once per turn. At Haiku's rates that is a fraction of a cent, and it is the only request the mod ever makes on your behalf. `/hud suggest off` removes it entirely.
+- **About a hundred cached tokens for plan tracking.** The note rides on every request, in the part of the prompt the cache keeps. `/hud track off` removes it.
+- **Two kinds of model call, both on Haiku.** The suggestions under the strip are written by reading the turn that just ended: a few hundred input tokens and a ceiling of 120 out, once per turn. The heads-up reads the recent conversation, at most every third turn and only after a substantial one, with a ceiling of 100 out. At Haiku's rates each is a fraction of a cent, and they are the only requests the mod ever makes on your behalf. `/hud suggest off` and `/hud know off` remove them entirely.
 
-The arithmetic that matters: routing one planning turn from Opus to Haiku saves far more than every suggestion in a long session costs. If you would rather it spent nothing at all, turn suggestions off and it spends nothing at all.
+The arithmetic that matters: routing one planning turn from Opus to Haiku saves far more than every suggestion in a long session costs. If you would rather it spent nothing at all, turn suggestions and the heads-up off and it spends nothing at all.
 
 ### Choosing the models
 
@@ -337,7 +359,7 @@ $.ui.ask            $.ui.close          $.ui.invalidate     $.ui.open
 $.ui.panes          $.ui.resolve
 ```
 
-No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds four on/off switches (`suggest`, `know`, `blast` and `confirm`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
+No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds five on/off switches (`suggest`, `know`, `blast`, `confirm` and `track`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. One hook changes what the model is given and nothing else: it adds the plan-tracking note to the system prompt. It is fixed text and goes with `/hud track off`. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
 
 ## What it does not do
 
@@ -356,6 +378,10 @@ claude plugin test            # run the tests, from inside ./hud
 The logic worth testing is in two files with no dependency on the mods API, so [`hud/tests/hud.test.ts`](hud/tests/hud.test.ts) covers classification, quota holdback, bar rendering, fixed-width padding, and fitting the strip to a narrow window without wrapping.
 
 Tested against Claude Code v2.1.299. Mod events and methods change between releases, so trust the type declarations Claude Code writes into `hud/.claude-plugin/types/` over anything here.
+
+## Credits
+
+The progress bar's look, its colours and the way its fill is dithered follow [savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress) by johnnyvizz, which is MIT licensed. The drawing here is written for this mod, but the design is theirs.
 
 ## Licence
 

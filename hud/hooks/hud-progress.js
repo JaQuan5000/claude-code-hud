@@ -155,6 +155,9 @@ function statusName(value) {
  */
 export function applyTaskTool(tasks, tool, event, result) {
     const list = Array.isArray(tasks) ? tasks : [];
+    // A call that errored changed nothing: an update to an id that does not
+    // exist must not become a task of its own.
+    if (result && typeof result === 'object' && result.isError) return list;
     const out = resultOf(result);
 
     if (tool === 'TaskCreate') {
@@ -236,9 +239,10 @@ export function todosFromTasks(tasks) {
  * outside those look identical, and finding out which took a round trip each
  * time. This says which, by counting what actually arrived.
  *
- * `seen` is how many calls of each plan tool have gone past this session.
+ * `seen` is how many calls of each plan tool have gone past this session;
+ * `tracking` is whether Claude is being asked to keep a task list.
  */
-export function planReport({ seen, tasks, plan }) {
+export function planReport({ seen, tasks, plan, tracking }) {
     const counts = seen || {};
     const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList']
         .reduce((n, k) => n + (counts[k] || 0), 0);
@@ -250,6 +254,7 @@ export function planReport({ seen, tasks, plan }) {
             + (plan.complete ? ', finished' : '')
         : 'plan: none');
     lines.push('tasks tracked from the task tools: ' + tracked);
+    lines.push('plan tracking: ' + (tracking ? 'on, Claude is asked to keep a task list for long jobs' : 'off'));
     lines.push('plan tool calls seen this session: TaskCreate ' + (counts.TaskCreate || 0)
         + ', TaskUpdate ' + (counts.TaskUpdate || 0)
         + ', TaskList ' + (counts.TaskList || 0)
@@ -259,9 +264,15 @@ export function planReport({ seen, tasks, plan }) {
 
     if (total === 0) {
         lines.push('No plan tool has been called in this session, so there is nothing to draw.');
-        lines.push('If Claude is working through a big job, either it is not keeping a task list for it');
-        lines.push('(ask it to plan the work as tasks), or this mod was loaded before it was updated');
-        lines.push('and needs Claude Code restarted.');
+        lines.push('The bar counts a task list, and a job run without one - often one handed to');
+        lines.push('subagents a step at a time - has nothing to count.');
+        if (tracking) {
+            lines.push('Plan tracking is on, so Claude is asked to keep one for any job of three or more');
+            lines.push('steps, from its next request. A job already under way may need asking directly:');
+            lines.push('"keep a task list for the rest of this".');
+        } else {
+            lines.push('Plan tracking is off. /hud track on asks Claude to keep one for long jobs.');
+        }
     } else if (!plan) {
         lines.push('Tasks have been seen, but there is no bar. A plan needs two or more tasks,');
         lines.push('and the bar goes the moment the last one is done.');
@@ -271,4 +282,125 @@ export function planReport({ seen, tasks, plan }) {
         lines.push('The bar should be showing' + ' above the strip, or in the sidebar on the desktop.');
     }
     return lines;
+}
+
+// =====================================================================
+// Getting the plan back after a reload
+//
+// Everything above learns the plan by watching the calls go past. A mod that
+// is reloaded, or a Claude Code that is restarted and resumed, starts with
+// nothing: the tasks were all created before it was listening, so the bar
+// stayed away until Claude happened to call TaskList, which it may never do.
+// The transcript has every one of those calls with its result, so the plan is
+// read back out of it once, at the start.
+// =====================================================================
+
+/** The tools that build a plan. */
+const PLAN_TOOLS = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList'];
+
+/**
+ * A call's result as applyTaskTool reads it, from what the transcript kept.
+ *
+ * The typed record is preferred. Where only the text the model read survived,
+ * TaskCreate's "Task #3 created successfully: ..." still names the id, which
+ * is all an update needs to land on the right task.
+ */
+function storedResult(use) {
+    if (use.result !== undefined && use.result !== null) return { result: use.result };
+    if (use.tool === 'TaskCreate' && typeof use.text === 'string') {
+        const m = /Task #([A-Za-z0-9_-]+) created/.exec(use.text);
+        if (m) return { result: { task: { id: m[1] } } };
+    }
+    return null;
+}
+
+/**
+ * The plan as the transcript left it: `{ tasks, todos, source, counts }`.
+ *
+ * `source` is whichever kind of list was written last, `tasks` or `todos`, so
+ * a session that moved from one to the other shows the one in use. Errored
+ * calls changed nothing and are skipped. Only the main conversation is read,
+ * because a subagent's todo list is its own and is not the job you are
+ * watching.
+ */
+export function replayPlan(messages) {
+    let tasks = [];
+    let todos = [];
+    let source = '';
+    const counts = { TodoWrite: 0, TaskCreate: 0, TaskUpdate: 0, TaskList: 0, last: '' };
+
+    for (const message of Array.isArray(messages) ? messages : []) {
+        if (!message || message.role !== 'assistant' || !Array.isArray(message.toolUses)) continue;
+        for (const use of message.toolUses) {
+            if (!use || typeof use !== 'object' || use.isError) continue;
+            if (!PLAN_TOOLS.includes(use.tool)) continue;
+            const input = use.input && typeof use.input === 'object' ? use.input : {};
+
+            if (use.tool === 'TodoWrite') {
+                todos = todosFrom(input);
+                source = 'todos';
+            } else {
+                const result = storedResult(use);
+                // A create with no id, or a list with no answer, is unreadable:
+                // skipped rather than guessed at.
+                if (!result && use.tool !== 'TaskUpdate') continue;
+                tasks = applyTaskTool(tasks, use.tool, input, result || {});
+                source = 'tasks';
+            }
+            counts[use.tool] += 1;
+            counts.last = use.tool;
+        }
+    }
+    return { tasks, todos, source, counts };
+}
+
+// =====================================================================
+// Asking for a plan
+//
+// The bar can only count what Claude writes down. A long job run without a
+// task list - most often one handed out to subagents a step at a time - has
+// no denominator, and from the outside that looks exactly like a broken bar.
+// So the mod asks, in one short section of the system prompt, for the task
+// list a long job should have anyway. `/hud track off` stops asking.
+// =====================================================================
+
+/** The id of the section in the system prompt. */
+export const TRACK_SECTION = 'hud:progress';
+
+/**
+ * The words added to the system prompt, or '' when there is nothing to ask
+ * for because the session offers no way to keep a list.
+ *
+ * The wording was tried against real sessions, and the two things in it that
+ * matter are the two a softer version lacked. It is an instruction ("before
+ * your first tool call"), not a suggestion: a model that is merely told it
+ * could keep a list mostly does not. And it says how to load the task tools,
+ * because Claude Code lists them but keeps their schemas behind ToolSearch, so
+ * a model has to fetch them first and, unprompted, rarely does.
+ *
+ * Fixed text for each kind of session, so the prompt cache sees the same
+ * section on every request and it costs its few tokens once.
+ */
+export function trackingNudge(tools) {
+    const offered = Array.isArray(tools) ? tools : [];
+    const hasTasks = offered.includes('TaskCreate') && offered.includes('TaskUpdate');
+    const hasTodos = offered.includes('TodoWrite');
+    const canLoad = offered.includes('ToolSearch');
+    if (!hasTasks && !hasTodos && !canLoad) return '';
+
+    const lead = 'Progress tracking is required here. Before your first tool call on any request with three or more steps, '
+        + 'or when you are carrying out a written plan, create the task list: ';
+    const tail = ' Keep the list in the main conversation even when the steps are handed to subagents, and update it '
+        + 'as each step\'s work is accepted. The person watches a progress bar that counts exactly these tasks, '
+        + 'so work without them is invisible to them. Skip this for questions and single small edits.';
+
+    if (hasTasks || (canLoad && !hasTodos)) {
+        const load = canLoad
+            ? 'if TaskCreate and TaskUpdate are not loaded yet, load them with ToolSearch (query "select:TaskCreate,TaskUpdate"), then '
+            : '';
+        return lead + load + 'call TaskCreate once per step. Mark each task in_progress with TaskUpdate when you begin it '
+            + 'and completed as soon as it is done.' + tail;
+    }
+    return lead + 'write the steps with TodoWrite, and write the list again as each step starts and finishes, '
+        + 'with exactly one in_progress at a time.' + tail;
 }

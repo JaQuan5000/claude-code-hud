@@ -15,7 +15,7 @@
  */
 
 import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText, planBar } from './hud-format.js';
-import { gaugeSvg, gaugeAlt, progressSvg, progressAlt } from './hud-svg.js';
+import { gaugeSvg, gaugeAlt, planSvg, progressAlt, PLAN_ACCENT, PLAN_DONE } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
 import { record, logLines, tuneLines, signalsIn, snippet } from './hud-log.js';
@@ -23,12 +23,15 @@ import { buildSuggestPrompt, parseSuggestions } from './hud-suggest.js';
 import { readUsage, describeUsage } from './hud-usage.js';
 import { spawned, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, isAlive } from './hud-agents.js';
-import { assess, previewFor, countLines, describe, warningFor } from './hud-blast.js';
+import { assess, previewFor, countLines, describe, warningFor, recordGuard, RAN, CANCELLED, PASSED } from './hud-blast.js';
 import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 import { readingsFor, worstLevel, needsClock, leadNote, clockText,
     CALM, WATCH, URGENT } from './hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks, planReport } from './hud-progress.js';
+import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks, planReport,
+    replayPlan, trackingNudge, TRACK_SECTION } from './hud-progress.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
+import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
+import { projectionText } from './hud-pace.js';
 
 /**
  * What the strip draws from.
@@ -110,6 +113,17 @@ const state = {
     turnToolCalls: 0,
     /** Whether a destructive command is measured before it runs. */
     blastOn: true,
+    /**
+     * Whether Claude is asked to keep a task list for a long job, which is the
+     * only thing the progress bar can count. Off, the bar shows only when
+     * Claude keeps one on its own.
+     */
+    trackOn: true,
+    /** What the guard has looked at: how many commands, and the ones it stopped on. */
+    guardSeen: 0,
+    guards: [],
+    /** What the session's turns have spent, for the sidebar. */
+    stats: emptyStats(),
 };
 
 /**
@@ -282,7 +296,7 @@ function wantClock($, wanted) {
  * Every read and write is allowed to fail. A store that is unavailable means
  * the defaults, never a broken session.
  */
-const PREF_KEYS = ['suggestOn', 'headsOn', 'blastOn', 'confirmOn'];
+const PREF_KEYS = ['suggestOn', 'headsOn', 'blastOn', 'confirmOn', 'trackOn'];
 let lastSavedPrefs = '';
 
 async function loadPrefs($) {
@@ -403,8 +417,21 @@ async function hudCommand($, e) {
 
     if (verb === 'plan') {
         return {
-            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan }).join('\n'),
+            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan, tracking: state.trackOn }).join('\n'),
         };
+    }
+
+    if (verb === 'track') {
+        const how = (words[1] || '').toLowerCase();
+        if (how === 'off' || how === 'on') {
+            state.trackOn = how === 'on';
+            return {
+                text: state.trackOn
+                    ? 'Plan tracking on. From the next request Claude is asked to keep a task list for any job of three or more steps, and the bar follows it.'
+                    : 'Plan tracking off. Nothing is added to the prompt; the bar shows only when Claude keeps a task list on its own.',
+            };
+        }
+        return { text: 'Plan tracking is ' + (state.trackOn ? 'on' : 'off') + '. Use /hud track on or /hud track off.' };
     }
 
     if (verb === 'panel') {
@@ -514,6 +541,7 @@ async function hudCommand($, e) {
     lines.push('  /hud confirm on | off    the question near the limit (asked once per window)');
     lines.push('  /hud panel [off]         the desktop sidebar: open it, or put the strip back');
     lines.push('  /hud plan                what the progress bar has seen, and why it is or is not showing');
+    lines.push('  /hud track on | off      ask Claude to keep a task list for long jobs, so the bar can show');
     lines.push('  /hud know on | off       one thing you may have missed, after a big turn');
     lines.push('  /hud blast on | off      measure a destructive command before running it');
     lines.push('  /hud agents              every subagent this session has run');
@@ -576,6 +604,96 @@ async function sidebarShown($) {
     }
 }
 
+/**
+ * The switches the sidebar shows, in the order it shows them.
+ *
+ * Each is the same switch the /hud command flips, so there is one rule for
+ * what turning it on or off does and the sidebar cannot disagree with the
+ * command. `field` is where the switch lives in `state`.
+ */
+const SWITCHES = [
+    { key: 'routing', field: 'routing', label: 'Routing', hint: 'cheapest capable model for each prompt' },
+    { key: 'suggest', field: 'suggestOn', label: 'Follow-ups', hint: 'three next steps after each turn' },
+    { key: 'know', field: 'headsOn', label: 'Heads up', hint: 'one thing you may have missed' },
+    { key: 'blast', field: 'blastOn', label: 'Blast radius', hint: 'measure a destructive command first' },
+    { key: 'confirm', field: 'confirmOn', label: 'Ask near the limit', hint: 'once per window, when it is nearly gone' },
+    { key: 'track', field: 'trackOn', label: 'Plan tracking', hint: 'ask Claude to keep a task list for long jobs' },
+];
+
+/**
+ * Flip one switch, through the /hud command so the rule lives in one place,
+ * and keep it for next time.
+ *
+ * Top level because it is handed `$`. It never throws: a press that fails
+ * must not take the sidebar down with it.
+ */
+async function flipSwitch($, key) {
+    const found = SWITCHES.find((s) => s.key === key);
+    if (!found) return;
+    try {
+        const verb = state[found.field] ? 'off' : 'on';
+        await hudCommand($, { args: key === 'routing' ? verb : key + ' ' + verb });
+        await savePrefs($);
+    } catch {
+        // Not flipped. The next redraw shows the truth either way.
+    }
+    $.ui.invalidate('ui.render');
+}
+
+/** Point one tier at another model, through /hud set. Never throws. */
+async function setTier($, tier, id) {
+    try {
+        await hudCommand($, { args: 'set ' + tier + ' ' + id });
+    } catch {
+        // Unchanged. The picker redraws with what the tier still is.
+    }
+    $.ui.invalidate('ui.render');
+}
+
+/** Hand control back to routing after a model was picked by hand. */
+async function backToAuto($) {
+    try {
+        await hudCommand($, { args: 'auto' });
+    } catch {
+        // Still pinned; the badge says so.
+    }
+    $.ui.invalidate('ui.render');
+}
+
+/**
+ * Remember a destructive command the guard stopped on, for the sidebar.
+ * Top level because it is handed `$` to ask for the redraw.
+ */
+function flagGuard($, found, count, outcome) {
+    state.guards = recordGuard(state.guards, { kind: found.kind, text: describe(found, count), outcome });
+    $.ui.invalidate('ui.render');
+}
+
+/**
+ * The plan as the transcript left it, read back once when the module starts.
+ *
+ * Top level because it is handed the API. Never throws: no transcript means the
+ * plan in hand is left as it was.
+ */
+async function restorePlan($) {
+    let found;
+    try {
+        found = replayPlan(await $.session.messages());
+    } catch {
+        // No transcript to read. Whatever is in hand stays.
+        return;
+    }
+    // Replaced, not added to: the transcript is the whole truth. A session
+    // that was cleared replays to nothing, which is exactly right.
+    state.planSeen = { ...found.counts };
+    state.tasks = found.tasks;
+    const items = found.source === 'todos' ? found.todos : todosFromTasks(found.tasks);
+    const plan = progressOf(items);
+    state.plan = plan;
+    state.planItems = plan ? items : [];
+    $.ui.invalidate('ui.render');
+}
+
 /** Everything the sidebar draws, gathered from state that is already there. */
 function panelData($, model) {
     const readings = readingsFor({
@@ -584,30 +702,65 @@ function panelData($, model) {
         labelOf: shortKind,
     });
     const agents = visible(state.agents);
+    const session = sessionOf(state.lastUsage);
+    const now = Date.now();
     return {
         model,
         pinned: state.pinned,
         routingOn: state.routing,
         reason: state.reason,
+        held: state.held,
         readings,
         worst: worstLevel(readings),
+        contextDetail: contextText(session),
+        projections: Object.fromEntries(readings
+            .filter((r) => r.pace)
+            .map((r) => [r.key, projectionText(r.pace)])),
+        session: {
+            cost: session.costUsd === null ? '' : moneyText(session.costUsd),
+            age: session.startedAt === null ? '' : spanText(now - session.startedAt),
+        },
+        stats: statsView(state.stats),
         plan: worthShowing(state.plan) ? state.plan : null,
         planItems: state.planItems,
         agents,
         agentShares: shares(agents),
+        headsNote: state.headsNote,
+        suggestions: state.suggestions,
+        guard: { on: state.blastOn, seen: state.guardSeen, flagged: state.guards.slice().reverse() },
         tiers: {
             fast: shortModel(opts.fastModel),
             base: shortModel(opts.baseModel),
             deep: shortModel(opts.deepModel),
             top: opts.routeToTop ? shortModel(opts.topModel) : 'off',
         },
+        tierIds: { fast: opts.fastModel, base: opts.baseModel, deep: opts.deepModel },
+        models: MODELS.map((m) => ({ value: m.id, label: m.short })),
         // Newest first, which is how a person reads "recent".
-        log: state.log.slice().reverse().map((entry) => ({ tier: entry.tier, short: entry.short })),
+        log: state.log.slice().reverse().map((entry) => ({
+            tier: entry.tier,
+            short: entry.short,
+            text: entry.text,
+            signals: entry.signals,
+        })),
+        switches: SWITCHES.map((s) => ({ key: s.key, label: s.label, hint: s.hint, on: !!state[s.field] })),
         collapsed: state.collapsed,
         resetCountdown: resetText,
         toggle: (key) => {
             state.collapsed = { ...state.collapsed, [key]: !state.collapsed[key] };
             $.ui.invalidate('ui.render');
+        },
+        onSwitch: (key) => flipSwitch($, key),
+        onTier: (tier, id) => setTier($, tier, id),
+        onAuto: () => backToAuto($),
+        onDismissHeads: () => {
+            state.headsNote = null;
+            $.ui.invalidate('ui.render');
+        },
+        onSuggestion: (text) => {
+            state.suggestions = [];
+            $.ui.invalidate('ui.render');
+            $.prompt.submit({ text, asUser: true });
         },
     };
 }
@@ -646,11 +799,21 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|agents]',
+            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|track|agents]',
         });
 
         // What you switched off last time stays off.
         await loadPrefs($);
+
+        // A reload or a resume starts this module with nothing, while the
+        // session's task list carries on. Read it back so the bar is there now,
+        // not after the next task call.
+        // A new, cleared or resumed session keeps its own tally.
+        state.stats = emptyStats();
+        state.guardSeen = 0;
+        state.guards = [];
+
+        await restorePlan($);
 
         // The sidebar is for the desktop app. The terminal is not offered it,
         // so it is exactly as it was.
@@ -706,15 +869,17 @@ export function register(on) {
         // Last turn's follow-ups are about last turn.
         state.suggestions = [];
 
+        // Kept whether or not routing acts on it: the follow-ups are about this
+        // prompt even when the model was picked by hand. Only what the suggester
+        // can use, so the whole prompt is not held in memory.
+        state.lastPrompt = String(e.text || '').slice(0, 300);
+
         if (!state.routing || state.pinned) {
             state.chosen = null;
             state.reason = state.pinned ? 'you picked this model' : 'routing is off';
             return next(e);
         }
 
-        // Only what the suggester can use, so the whole prompt is not held
-        // in memory until the next one replaces it.
-        state.lastPrompt = String(e.text || '').slice(0, 300);
         const tier = classify(e.text);
         let picked = chooseModel(tier, state, opts);
 
@@ -786,6 +951,11 @@ export function register(on) {
         }
 
         const result = await next(e);
+        // The main thread's own turns. A subagent's tokens are counted on its row.
+        if (!e.agentId) {
+            state.stats = addTurn(state.stats, e);
+            $.ui.invalidate('ui.render');
+        }
         if (e.agentId || e.isAborted) return result;
 
         state.headsSinceLast += 1;
@@ -859,12 +1029,15 @@ export function register(on) {
     // gets out of the way - it never blocks or alters the call.
     on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
         try {
-            state.planSeen.TodoWrite += 1;
-            state.planSeen.last = 'TodoWrite';
-            const plan = progressOf(todosFrom(e));
-            if (plan) {
+            // A subagent's todo list is its own, not the job you are watching.
+            if (!e.agentId) {
+                state.planSeen.TodoWrite += 1;
+                state.planSeen.last = 'TodoWrite';
+                const list = todosFrom(e);
+                const plan = progressOf(list);
+                // A list cut below two items is no plan: the old bar must not linger.
                 state.plan = plan;
-                state.planItems = todosFrom(e);
+                state.planItems = plan ? list : [];
                 $.ui.invalidate('ui.render');
             }
         } catch {
@@ -876,6 +1049,24 @@ export function register(on) {
         // and decoration must never be the reason a tool call fails.
         return next(e);
     });
+
+    // Plan tracking. The bar can only count a task list, and a long job run
+    // without one - most often one handed to subagents a step at a time - has
+    // nothing to count. So the mod asks for one in a short section at the end
+    // of the system prompt. Fixed text, so the prompt cache pays for it once.
+    // /hud track off stops it.
+    //
+    // The task tools are placed behind ToolSearch by Claude Code, and a
+    // tool.describe hook that answers isDeferred: false for them is run but
+    // not honoured for a built-in tool (checked against a real session), so
+    // the note says how to load them instead.
+    on('prompt.compose', async ($, e, next) => {
+        const out = await next(e);
+        if (!state.trackOn || !out || !Array.isArray(out.sections)) return out;
+        const text = trackingNudge(e.tools);
+        if (!text || out.sections.some((section) => section.id === TRACK_SECTION)) return out;
+        return { ...out, sections: [...out.sections, { id: TRACK_SECTION, text, scope: 'session' }] };
+    }).catch(async ($, e, next) => next(e));
 
     // The desktop app joined the session: give it the sidebar. The terminal's
     // own attachment raises nothing, so this never fires for it.
@@ -919,6 +1110,8 @@ export function register(on) {
     for (const tool of ['TaskCreate', 'TaskUpdate', 'TaskList']) {
         on('tool.call', { tool }, async ($, e, next) => {
             const result = await next(e);
+            // A subagent's task list is its own, not the job you are watching.
+            if (e.agentId) return result;
             try {
                 state.planSeen[tool] += 1;
                 state.planSeen.last = tool;
@@ -935,8 +1128,10 @@ export function register(on) {
     }
 
     on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-        state.turnToolCalls += 1;
+        // The heads-up check weighs the main thread's own work, not its subagents'.
+        if (!e.agentId) state.turnToolCalls += 1;
         if (!state.blastOn) return next(e);
+        state.guardSeen += 1;
 
         const found = assess(e.command);
         if (!found) return next(e);
@@ -966,11 +1161,14 @@ export function register(on) {
         } catch {
             // Nobody to ask, as in a -p run. Fall through to the usual
             // permission prompt rather than blocking unattended work.
+            flagGuard($, found, count, PASSED);
             return next(e);
         }
         if (answer !== 'Run it') {
+            flagGuard($, found, count, CANCELLED);
             return { deny: 'The user cancelled this command after seeing what it would affect.' };
         }
+        flagGuard($, found, count, RAN);
         return next(e);
     }).catch(async ($, e, next) => {
         // Fails open. A guard that blocks your work when it has a bug is
@@ -1169,63 +1367,97 @@ export function register(on) {
         // while a long job runs. It is absent on an ordinary turn.
         if (!sidebar && worthShowing(state.plan)) {
             const plan = state.plan;
-            const bar = [];
+            // savvy-progress's row, on both surfaces: a dot and the task in
+            // hand, the bar, "Tasks 4/12", the percentage. The colours are
+            // its own too: a soft violet while the work is under way, green
+            // once it is finished.
+            const color = plan.complete ? PLAN_DONE : PLAN_ACCENT;
+            const name = plan.label || 'Plan';
+            const count = 'Tasks ' + countText(plan);
+            const pct = percentText(plan.percent);
+            const columns = (e.props && e.props.bodyColumns)
+                || (e.viewport && e.viewport.columns)
+                || 80;
+
             if (e.surface === 'desktop' && typeof Svg === 'function') {
-                bar.push(Svg({
-                    key: 'pg-b',
-                    alt: progressAlt(plan),
-                    width: 180,
-                    height: 8,
-                    source: progressSvg(plan.donePercent, plan.reachedPercent, { width: 180, height: 8 }),
+                // The desktop draws the bar as a picture: the dithered fill,
+                // the faint layer for work in hand, a tick for every task
+                // still ahead and the count riding the head of the fill.
+                // The name and the percentage stay Text, so they follow the
+                // app's theme. The name is the one thing allowed to give way;
+                // the bar and the percentage never shrink, because a progress
+                // bar torn across two lines says nothing.
+                const barW = Math.max(160, Math.min(900, columns * 8 - 320));
+                rows.push(Box({
+                    key: 'hud-progress',
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    columnGap: 2,
+                    children: [
+                        Box({
+                            key: 'pg-head',
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            columnGap: 1,
+                            flexShrink: 1,
+                            minWidth: 0,
+                            children: [
+                                Text({ key: 'pg-i', color, wrap: 'truncate', children: ['●'] }),
+                                Text({ key: 'pg-n', weight: 'medium', wrap: 'truncate-end', children: [name] }),
+                            ],
+                        }),
+                        Box({
+                            key: 'pg-tail',
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            columnGap: 2,
+                            flexShrink: 0,
+                            children: [
+                                Svg({
+                                    key: 'pg-b',
+                                    alt: progressAlt(plan),
+                                    width: barW,
+                                    height: 16,
+                                    source: planSvg(plan, { width: barW }),
+                                }),
+                                Text({ key: 'pg-p', dimColor: true, tabular: true, wrap: 'truncate', children: [pct] }),
+                            ],
+                        }),
+                    ],
                 }));
             } else {
-                for (const piece of planBar(plan, opts.ascii)) {
-                    bar.push(Text({
-                        key: 'pg-c' + bar.length,
-                        color: piece.color,
-                        dimColor: !!piece.dim,
-                        children: [piece.text],
-                    }));
-                }
+                // The terminal: the same row in characters. The name has a
+                // fixed column so the bar starts in the same place on every
+                // redraw, and the bar takes what is left, up to forty cells.
+                const titleW = Math.max(8, Math.min(30, name.length + 2, Math.floor(columns / 3)));
+                const cells = Math.max(6, Math.min(40, columns - titleW - count.length - pct.length - 8));
+                const pieces = planBar(plan, opts.ascii, cells);
+                rows.push(Box({
+                    key: 'hud-progress',
+                    flexDirection: 'row',
+                    columnGap: 2,
+                    children: [
+                        Box({
+                            key: 'pg-head',
+                            width: titleW,
+                            flexShrink: 0,
+                            flexDirection: 'row',
+                            children: [
+                                Text({ key: 'pg-i', color, children: [opts.ascii ? '* ' : '● '] }),
+                                Text({ key: 'pg-n', wrap: 'truncate-end', children: [name] }),
+                            ],
+                        }),
+                        Box({
+                            key: 'pg-bar',
+                            flexDirection: 'row',
+                            flexShrink: 0,
+                            children: pieces.map((p, i) => Text({ key: 'pg-c' + i, color: p.color, children: [p.text] })),
+                        }),
+                        Text({ key: 'pg-count', bold: true, wrap: 'truncate', children: [count] }),
+                        Text({ key: 'pg-p', dimColor: true, wrap: 'truncate', children: [pct] }),
+                    ],
+                }));
             }
-            bar.push(Text({ key: 'pg-c', dimColor: true, tabular: true, wrap: 'truncate', children: [countText(plan)] }));
-            bar.push(Text({ key: 'pg-p', color: 'blue', weight: 'medium', tabular: true, wrap: 'truncate', children: [percentText(plan.percent)] }));
-
-            // The task's name is the one thing here allowed to give way. It
-            // can be as long as a sentence, so it truncates with an ellipsis
-            // when the band is narrow, while the bar, the count and the
-            // percentage stay together as a block that never shrinks - a
-            // progress bar torn across two lines says nothing.
-            rows.push(Box({
-                key: 'hud-progress',
-                flexDirection: 'row',
-                alignItems: 'center',
-                columnGap: 2,
-                children: [
-                    Box({
-                        key: 'pg-head',
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        columnGap: 1,
-                        flexShrink: 1,
-                        minWidth: 0,
-                        children: [
-                            Text({ key: 'pg-i', color: 'blue', children: ['▸'] }),
-                            ...(plan.label
-                                ? [Text({ key: 'pg-n', wrap: 'truncate-end', children: [plan.label] })]
-                                : []),
-                        ],
-                    }),
-                    Box({
-                        key: 'pg-tail',
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        columnGap: 1,
-                        flexShrink: 0,
-                        children: bar,
-                    }),
-                ],
-            }));
         }
 
         if (strip) rows.push(strip);
@@ -1304,7 +1536,7 @@ export function register(on) {
         }
 
         // One thing you may have missed, until you dismiss it.
-        if (state.headsNote) {
+        if (!sidebar && state.headsNote) {
             rows.push(Box({
                 key: 'hud-heads',
                 flexDirection: 'row',
@@ -1326,7 +1558,7 @@ export function register(on) {
                 ],
             }));
         }
-        if (state.suggestions.length) {
+        if (!sidebar && state.suggestions.length) {
             rows.push(Box({
                 key: 'hud-next',
                 flexDirection: 'row',

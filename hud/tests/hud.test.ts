@@ -12,18 +12,22 @@ import { expect, test } from 'claude-code/testing';
 
 import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
 import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js';
-import { paceOf, paceText, paceMark, FAST_RATIO } from '../hooks/hud-pace.js';
+import { paceOf, paceText, paceMark, projectionText, FAST_RATIO } from '../hooks/hud-pace.js';
 import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
 import { buildSuggestPrompt, parseSuggestions, WANTED, MAX_LENGTH } from '../hooks/hud-suggest.js';
 import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, describeUsage, hasFableWindow } from '../hooks/hud-usage.js';
 import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
-import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport } from '../hooks/hud-progress.js';
-import { planBar } from '../hooks/hud-format.js';
+import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport,
+    replayPlan, trackingNudge, TRACK_SECTION } from '../hooks/hud-progress.js';
+import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
+import { planBar, PLAN_ACCENT, PLAN_DONE } from '../hooks/hud-format.js';
+import { planSvg } from '../hooks/hud-svg.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
-import { assess, firstPath, previewFor, countLines, describe, warningFor } from '../hooks/hud-blast.js';
+import { assess, firstPath, previewFor, countLines, describe, warningFor,
+    recordGuard, GUARD_KEEP, RAN, CANCELLED, PASSED } from '../hooks/hud-blast.js';
 import { shouldCheck, buildHeadsPrompt, flatten, parseHeadsUp } from '../hooks/hud-heads.js';
 import { barText, barPieces, fit, layout, buildGroups, percentText, modelText, resetText, shortKind, tone, width } from '../hooks/hud-format.js';
 
@@ -1444,34 +1448,115 @@ test('an unfamiliar status counts as not started rather than breaking', async ()
     expect(plan.doing).toBe(0);
 });
 
-test('the terminal bar is blue, two weights, and exactly as wide as asked', async () => {
-    const plan = progressOf([
-        { content: 'a', status: 'completed' },
-        { content: 'b', status: 'in_progress' },
-        { content: 'c', status: 'pending' },
-        { content: 'd', status: 'pending' },
-    ]);
-    const pieces = planBar(plan, false, 16);
+const quarterPlan = () => progressOf([
+    { content: 'a', status: 'completed' },
+    { content: 'b', status: 'in_progress' },
+    { content: 'c', status: 'pending' },
+    { content: 'd', status: 'pending' },
+]);
+
+test('the terminal bar is savvy-progress\'s: solid blocks, a light shade, exactly as wide as asked', async () => {
+    const pieces = planBar(quarterPlan(), false, 16);
     const text = pieces.map((x) => x.text).join('');
     expect(text.length).toBe(16);
-    expect(text.startsWith('[')).toBe(true);
-    expect(text.endsWith(']')).toBe(true);
-    // Never the quota colours: progress is not a limit.
-    const colors = pieces.map((x) => x.color).filter(Boolean);
-    expect(colors.every((c) => c === 'blue')).toBe(true);
+    // One in four done: four solid, twelve light, and no brackets.
+    expect(text).toBe('█'.repeat(4) + '░'.repeat(12));
+});
+
+test('the terminal bar is the plan\'s violet while under way, never a quota colour', async () => {
+    const colors = planBar(quarterPlan(), false, 16).map((x) => x.color);
+    expect(colors.every((c) => c === PLAN_ACCENT)).toBe(true);
+    expect(PLAN_ACCENT).toBe('#8f8cf4');
+});
+
+test('and green once it is finished, and full', async () => {
+    const plan = progressOf([{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }]);
+    const pieces = planBar(plan, false, 10);
+    expect(pieces.length).toBe(1);
+    expect(pieces[0].text).toBe('█'.repeat(10));
+    expect(pieces[0].color).toBe(PLAN_DONE);
+});
+
+test('the bar is never full until the last item is done', async () => {
+    const todos = [];
+    for (let i = 0; i < 39; i += 1) todos.push({ content: 'x' + i, status: 'completed' });
+    todos.push({ content: 'last', status: 'in_progress' });
+    const text = planBar(progressOf(todos), false, 16).map((x) => x.text).join('');
+    expect(text.endsWith('░')).toBe(true);
 });
 
 test('the first item of a long plan still shows as something begun', async () => {
+    // One of forty in sixteen cells rounds to nothing, which is the case.
     const todos = [{ content: 'a', status: 'completed' }];
-    for (let i = 0; i < 19; i += 1) todos.push({ content: 'x' + i, status: 'pending' });
+    for (let i = 0; i < 39; i += 1) todos.push({ content: 'x' + i, status: 'pending' });
     const pieces = planBar(progressOf(todos), false, 16);
-    const solid = pieces.find((x) => x.color === 'blue' && !x.dim);
-    expect(!!solid).toBe(true);
+    expect(pieces[0].text.startsWith('█')).toBe(true);
 });
 
 test('an empty plan draws an empty track, not a broken bar', async () => {
     const pieces = planBar(null, false, 16);
-    expect(pieces.map((x) => x.text).join('').length).toBe(16);
+    expect(pieces.map((x) => x.text).join('')).toBe('░'.repeat(16));
+});
+
+test('a terminal that is not UTF-8 gets the same bar in plain characters', async () => {
+    const text = planBar(quarterPlan(), true, 8).map((x) => x.text).join('');
+    expect(text).toBe('##------');
+});
+
+// ---- the desktop's bar
+
+test('the desktop bar carries the count on a pill at the head of the fill', async () => {
+    const svg = planSvg({ total: 12, done: 4, doing: 1, complete: false }, { width: 400 });
+    expect(svg.startsWith('<svg')).toBe(true);
+    expect(svg.includes('>4/12</text>')).toBe(true);
+    expect(svg.includes('fill="#8f8cf4"')).toBe(true);
+});
+
+test('it marks where every task still ahead begins', async () => {
+    // Twelve tasks, four done: ticks for the seven boundaries past the fill.
+    const svg = planSvg({ total: 12, done: 4, doing: 0, complete: false }, { width: 600 });
+    const ticks = (svg.match(/height="8" rx="0.75"/g) || []).length;
+    expect(ticks).toBe(7);
+});
+
+test('work in hand is a faint layer ahead of the fill, and none without any', async () => {
+    const busy = planSvg({ total: 4, done: 1, doing: 2, complete: false }, { width: 400 });
+    const idle = planSvg({ total: 4, done: 1, doing: 0, complete: false }, { width: 400 });
+    const faint = (s) => (s.match(/width="1.7"/g) || []).length;
+    expect(faint(busy) > 0).toBe(true);
+    expect(faint(idle)).toBe(0);
+});
+
+test('the dither is the same on every redraw, so it never shimmers', async () => {
+    const a = planSvg({ total: 8, done: 3, doing: 1, complete: false }, { width: 400 });
+    const b = planSvg({ total: 8, done: 3, doing: 1, complete: false }, { width: 400 });
+    expect(a).toBe(b);
+});
+
+test('a finished plan is green and settles to a slow glow', async () => {
+    const svg = planSvg({ total: 3, done: 3, doing: 0, complete: true }, { width: 300 });
+    expect(svg.includes('fill="#5fbf8f"')).toBe(true);
+    expect(svg.includes('fill="#8f8cf4"')).toBe(false);
+    expect(svg.includes('opacity:0.8')).toBe(true);
+});
+
+test('the twinkle stops for anyone who asked for less motion', async () => {
+    const svg = planSvg({ total: 3, done: 1, doing: 0, complete: false }, { width: 300 });
+    expect(svg.includes('prefers-reduced-motion: reduce')).toBe(true);
+});
+
+test('nothing in the bar assumes a theme: the only text is white on the plan colour', async () => {
+    const svg = planSvg({ total: 5, done: 2, doing: 1, complete: false }, { width: 300 });
+    const texts = svg.match(/<text[^>]*>/g) || [];
+    expect(texts.length).toBe(1);
+    expect(texts[0].includes('fill="#ffffff"')).toBe(true);
+    expect(svg.includes('prefers-color-scheme')).toBe(false);
+});
+
+test('a plan with nothing in it draws a track and no pill', async () => {
+    const svg = planSvg(null, { width: 200 });
+    expect(svg.includes('<text')).toBe(false);
+    expect(svg.startsWith('<svg')).toBe(true);
 });
 
 // ====================================== the desktop strip holds its shape
@@ -2005,7 +2090,10 @@ test('a card with nothing to say is left out, not drawn empty', async () => {
     const tree = buildPanel(factories, {
         model: 'opus 5.5', worst: 'calm', readings: [], plan: null, agents: [], collapsed: {},
     });
-    expect(tree.children.length).toBe(1);
+    // Only the model card: no other card, however empty, is drawn.
+    const cards = tree.children.filter((c) => typeof c.key === 'string' && c.key.startsWith('card-'));
+    expect(cards.length).toBe(1);
+    expect(cards[0].key).toBe('card-hud');
 });
 
 test('every reading gets a row and a gauge', async () => {
@@ -2075,10 +2163,10 @@ test('the plan is listed item by item, the one in hand first', async () => {
     const text = textsOf(tree);
     expect(text.includes('Doing two')).toBe(true);
     expect(text.indexOf('Doing two') < text.indexOf('three')).toBe(true);
-    // A finished task is a count, not a row. A distinctive name, because a
-    // short one is found inside "1 done" and proves nothing.
-    expect(text.includes('alpha-finished')).toBe(false);
-    expect(text.includes('1 done')).toBe(true);
+    // A finished task is a trail, under its own heading, after the work still to do.
+    // A distinctive name, because a short one is found inside "1 done" and proves nothing.
+    expect(text.includes('alpha-finished')).toBe(true);
+    expect(text.indexOf('three') < text.indexOf('alpha-finished')).toBe(true);
 });
 
 test('a long plan says how many more there are', async () => {
@@ -2121,11 +2209,14 @@ test('two agents are each given their share', async () => {
     expect(textsOf(tree).includes('25%')).toBe(true);
 });
 
-test('routing shows each tier and starts folded', async () => {
-    expect(DEFAULT_COLLAPSED.routing).toBe(true);
+test('routing shows what was decided, and the models card shows each tier', async () => {
+    // What was decided is news and starts open; the models are something you set and start folded.
+    expect(!!DEFAULT_COLLAPSED.routing).toBe(false);
+    expect(DEFAULT_COLLAPSED.models).toBe(true);
     const tree = buildPanel(factories, {
         model: 'm', worst: 'calm', readings: [], routingOn: true,
         tiers: { fast: 'haiku 5.5', base: 'sonnet 5.5', deep: 'opus 5.5', top: 'fable 5.1' },
+        tierIds: { fast: 'a', base: 'b', deep: 'c' },
         log: [{ tier: 'deep', short: 'opus 5.5' }], collapsed: {},
     });
     const text = textsOf(tree);
@@ -2328,8 +2419,9 @@ test('/hud plan says no plan tool has been called, and what to do about it', asy
     const text = planReport({ seen: none, tasks: [], plan: null }).join('\n');
     expect(text.includes('No plan tool has been called')).toBe(true);
     // The two real causes, so the person knows which to chase.
-    expect(text.includes('not keeping a task list')).toBe(true);
-    expect(text.includes('restarted')).toBe(true);
+    expect(text.includes('has nothing to count')).toBe(true);
+    // Whether Claude is being asked to keep one is the thing to chase.
+    expect(text.includes('Plan tracking is off')).toBe(true);
 });
 
 test('it says tasks were seen but there is no bar, and why that is correct', async () => {
@@ -2388,4 +2480,981 @@ test('and /hud plan is listed in the help', async () => {
     const h = await sidebarSession({ surfaces: ['terminal'] });
     const text = (await h.say('')).text;
     expect(text.includes('/hud plan')).toBe(true);
+});
+
+
+// ============================================================ what a session spent
+//
+// Every figure in the Activity card and the header comes from numbers Claude
+// Code already hands over. Nothing is requested, so the only way these can be
+// wrong is arithmetic, which is what is checked here.
+
+const turnOf = (input, output, read, write, ms) => ({
+    usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: read, cache_creation_input_tokens: write },
+    durationMs: ms,
+});
+
+test('turns add up: tokens, the cache and the time', async () => {
+    let s = addTurn(emptyStats(), turnOf(100, 50, 900, 0, 60000));
+    s = addTurn(s, turnOf(10, 5, 90, 100, 30000));
+    expect(s.turns).toBe(2);
+    expect(s.input).toBe(110);
+    expect(s.output).toBe(55);
+    expect(s.cacheRead).toBe(990);
+    expect(s.cacheWrite).toBe(100);
+    expect(s.busyMs).toBe(90000);
+    expect(s.lastMs).toBe(30000);
+});
+
+test('a turn that reported nothing is not counted', async () => {
+    const before = addTurn(emptyStats(), turnOf(1, 1, 1, 1, 1000));
+    expect(addTurn(before, { isAborted: true }).turns).toBe(1);
+    expect(addTurn(before, undefined).turns).toBe(1);
+    expect(addTurn(before, {}).turns).toBe(1);
+});
+
+test('adding a turn never changes the stats it was given', async () => {
+    const before = addTurn(emptyStats(), turnOf(1, 1, 1, 1, 1000));
+    const snapshot = JSON.stringify(before);
+    addTurn(before, turnOf(5, 5, 5, 5, 5000));
+    expect(JSON.stringify(before)).toBe(snapshot);
+});
+
+test('a missing, negative or non-numeric count reads as nothing spent', async () => {
+    const s = addTurn(emptyStats(), { usage: { input_tokens: 'lots', output_tokens: -4, cache_read_input_tokens: NaN }, durationMs: 2000 });
+    expect(s.turns).toBe(1);
+    expect(s.input).toBe(0);
+    expect(s.output).toBe(0);
+    expect(s.cacheRead).toBe(0);
+});
+
+test('the cache hit is the share of all input the cache served', async () => {
+    // 900 read against 100 fresh and 0 written is 90%.
+    expect(Math.round(cacheHit(addTurn(emptyStats(), turnOf(100, 1, 900, 0, 1000))))).toBe(90);
+    // Written tokens are input that was not served from the cache.
+    expect(Math.round(cacheHit(addTurn(emptyStats(), turnOf(0, 1, 500, 500, 1000))))).toBe(50);
+});
+
+test('there is no cache figure before anything was read', async () => {
+    expect(cacheHit(emptyStats())).toBe(null);
+    expect(cacheHit(undefined)).toBe(null);
+});
+
+test('money is a short figure and a free turn is not "no cost"', async () => {
+    expect(moneyText(0)).toBe('$0.00');
+    expect(moneyText(0.004)).toBe('<$0.01');
+    expect(moneyText(1.8)).toBe('$1.80');
+    expect(moneyText(99.994)).toBe('$99.99');
+    expect(moneyText(1234.5)).toBe('$1,235');
+    expect(moneyText(-1)).toBe('');
+    expect(moneyText(NaN)).toBe('');
+    expect(moneyText(undefined)).toBe('');
+});
+
+test('a span is seconds, minutes, or hours and padded minutes', async () => {
+    expect(spanText(45000)).toBe('45s');
+    expect(spanText(12 * 60000)).toBe('12m');
+    expect(spanText(3600000)).toBe('1h');
+    // 1h5m reads as one hour five, not "1h5m" run together.
+    expect(spanText(65 * 60000)).toBe('1h05m');
+    expect(spanText(135 * 60000)).toBe('2h15m');
+    expect(spanText(-1)).toBe('');
+    expect(spanText(undefined)).toBe('');
+});
+
+test('the session facts come out of usage(), and absent is null, never zero', async () => {
+    const full = sessionOf({ startedAt: 1000, cost: { usd: 1.5 }, context: { tokens: 151000, window: 1000000, percent: 15 } });
+    expect(full.costUsd).toBe(1.5);
+    expect(full.startedAt).toBe(1000);
+    expect(full.contextTokens).toBe(151000);
+    expect(full.contextWindow).toBe(1000000);
+
+    const bare = sessionOf({ context: { window: 200000 }, rateLimits: [] });
+    expect(bare.costUsd).toBe(null);
+    expect(bare.startedAt).toBe(null);
+    expect(bare.contextTokens).toBe(null);
+
+    for (const junk of [null, undefined, 'x', 7, [], { cost: 'free', context: 'big' }]) {
+        const s = sessionOf(junk);
+        expect(s.costUsd).toBe(null);
+        expect(s.contextTokens).toBe(null);
+    }
+});
+
+test('context is said as tokens of a window, or not at all', async () => {
+    expect(contextText({ contextTokens: 151000, contextWindow: 1000000 })).toBe('151.0k of 1.0m tokens');
+    expect(contextText({ contextTokens: null, contextWindow: 1000000 })).toBe('');
+    expect(contextText({ contextTokens: 5, contextWindow: 0 })).toBe('');
+    expect(contextText(undefined)).toBe('');
+});
+
+test('the stats view does the sums so the card does none', async () => {
+    let s = addTurn(emptyStats(), turnOf(100, 50, 900, 0, 60000));
+    s = addTurn(s, turnOf(100, 50, 900, 0, 120000));
+    const v = statsView(s);
+    expect(v.turns).toBe(2);
+    expect(v.output).toBe('100');
+    expect(Math.round(v.cacheHit)).toBe(90);
+    expect(v.average).toBe('1m30s');
+    expect(v.last).toBe('2m');
+    expect(statsView(undefined).turns).toBe(0);
+    expect(statsView(undefined).cacheHit).toBe(null);
+});
+
+// ======================================================= where a window is heading
+
+test('the projection says where the window ends up at the pace so far', async () => {
+    // 30% used, half the window gone: 60% by the end.
+    expect(projectionText({ used: 0.3, elapsed: 0.5, ratio: 0.6, dryInMinutes: null })).toBe('on track for 60% by reset');
+});
+
+test('a projection past the limit says when it runs dry, not a number over a hundred', async () => {
+    expect(projectionText({ used: 0.8, elapsed: 0.5, ratio: 1.6, dryInMinutes: 75 })).toBe('on track to run dry in 1h15m');
+    // No dry time but a rate that overshoots is capped, never "180%".
+    expect(projectionText({ used: 0.9, elapsed: 0.5, ratio: 1.8, dryInMinutes: null })).toBe('on track for 100% by reset');
+});
+
+test('and it says nothing where the rate is not meaningful', async () => {
+    expect(projectionText(null)).toBe('');
+    expect(projectionText({ used: 0, elapsed: 0.5, ratio: 0, dryInMinutes: null })).toBe('');
+    // One early prompt makes the rate swing, so the first 5% says nothing.
+    expect(projectionText({ used: 0.2, elapsed: 0.02, ratio: 10, dryInMinutes: 3 })).toBe('');
+});
+
+test('the projection reads a real pace from paceOf', async () => {
+    const now = Date.UTC(2026, 9, 19, 12, 0, 0);
+    // A week window half over, 20% used: on track for about 40%.
+    const resetsAt = Math.floor((now + 3.5 * 24 * 3600000) / 1000);
+    const pace = paceOf('Week', 20, resetsAt, now);
+    expect(projectionText(pace)).toBe('on track for 40% by reset');
+});
+
+// ====================================================== what the guard stopped on
+
+test('the guard log keeps the newest few, newest last', async () => {
+    let log = [];
+    for (let i = 0; i < GUARD_KEEP + 3; i += 1) log = recordGuard(log, { kind: 'rm', text: 'n' + i, outcome: RAN });
+    expect(log.length).toBe(GUARD_KEEP);
+    expect(log[GUARD_KEEP - 1].text).toBe('n' + (GUARD_KEEP + 2));
+    expect(log[0].text).toBe('n3');
+});
+
+test('the guard log keeps the sentence shown and never the command', async () => {
+    const log = recordGuard([], { kind: 'rm', text: 'This deletes 4 files under build.', outcome: CANCELLED, command: 'rm -rf build --token=SECRET' });
+    expect(JSON.stringify(log).includes('SECRET')).toBe(false);
+    expect(JSON.stringify(log).includes('rm -rf')).toBe(false);
+    expect(log[0].outcome).toBe(CANCELLED);
+});
+
+test('a guard entry with no outcome is one nobody was asked about', async () => {
+    expect(recordGuard([], { kind: 'rm', text: 'x' })[0].outcome).toBe(PASSED);
+    expect(recordGuard(undefined, undefined).length).toBe(1);
+});
+
+// ================================================ the plan, read back after a reload
+//
+// The bar learns the plan by watching tool calls pass. A reloaded mod, or a
+// resumed session, starts with nothing while the task list carries on, so the
+// plan is read back out of the transcript once, at the start.
+
+const asst = (...uses) => ({ role: 'assistant', text: '', toolUses: uses });
+const create = (subject, id) => ({ tool: 'TaskCreate', input: { subject }, result: { task: { id, subject } }, text: 'Task #' + id + ' created successfully: ' + subject });
+const update = (taskId, status) => ({ tool: 'TaskUpdate', input: { taskId, status }, result: { success: true, taskId } });
+
+test('the plan is rebuilt from the creates and the updates', async () => {
+    const found = replayPlan([
+        asst(create('a', '1'), create('b', '2'), create('c', '3')),
+        { role: 'user', text: 'go', toolUses: [] },
+        asst(update('1', 'completed'), update('2', 'in_progress')),
+    ]);
+    const plan = progressOf(todosFromTasks(found.tasks));
+    expect(plan.total).toBe(3);
+    expect(plan.done).toBe(1);
+    expect(plan.doing).toBe(1);
+    expect(found.source).toBe('tasks');
+    expect(found.counts.TaskCreate).toBe(3);
+    expect(found.counts.TaskUpdate).toBe(2);
+    expect(found.counts.last).toBe('TaskUpdate');
+});
+
+test('a create whose record was not kept still gives its id from the text', async () => {
+    const found = replayPlan([
+        asst({ tool: 'TaskCreate', input: { subject: 'a' }, text: 'Task #7 created successfully: a' },
+            { tool: 'TaskCreate', input: { subject: 'b' }, text: 'Task #8 created successfully: b' }),
+        asst(update('7', 'completed')),
+    ]);
+    expect(found.tasks.length).toBe(2);
+    expect(found.tasks.find((t) => t.id === '7').status).toBe('completed');
+});
+
+test('a call that errored changed nothing, and one that cannot be read is skipped', async () => {
+    const found = replayPlan([
+        asst(create('a', '1'), create('b', '2')),
+        asst({ tool: 'TaskUpdate', input: { taskId: '1', status: 'completed' }, isError: true, text: 'no such task' }),
+        // No record and no id in the text: nothing safe to track.
+        asst({ tool: 'TaskCreate', input: { subject: 'ghost' }, text: 'something else entirely' }),
+    ]);
+    expect(found.tasks.length).toBe(2);
+    expect(found.tasks.every((t) => t.status === 'pending')).toBe(true);
+});
+
+test('a TodoWrite list is replayed too, and the last kind written is the one in use', async () => {
+    const todos = [{ content: 'x', status: 'completed', activeForm: 'x' }, { content: 'y', status: 'pending', activeForm: 'y' }];
+    const found = replayPlan([asst({ tool: 'TodoWrite', input: { todos }, result: {} })]);
+    expect(found.source).toBe('todos');
+    expect(progressOf(found.todos).done).toBe(1);
+
+    const later = replayPlan([
+        asst({ tool: 'TodoWrite', input: { todos }, result: {} }),
+        asst(create('a', '1'), create('b', '2')),
+    ]);
+    expect(later.source).toBe('tasks');
+});
+
+test('an empty or odd transcript replays to nothing rather than throwing', async () => {
+    for (const odd of [[], undefined, null, 'no', [null, 7, { role: 'assistant' }, { role: 'assistant', toolUses: 'x' }]]) {
+        const found = replayPlan(odd);
+        expect(found.tasks.length).toBe(0);
+        expect(found.source).toBe('');
+    }
+});
+
+test('a deleted task replays as gone', async () => {
+    const found = replayPlan([asst(create('a', '1'), create('b', '2'), create('c', '3')), asst(update('2', 'deleted'))]);
+    expect(found.tasks.length).toBe(2);
+});
+
+// ================================================================ asking for a plan
+
+test('with the task tools offered, Claude is asked to use them', async () => {
+    const text = trackingNudge(['Bash', 'TaskCreate', 'TaskUpdate', 'TaskList']);
+    expect(text.includes('TaskCreate')).toBe(true);
+    expect(text.includes('TaskUpdate')).toBe(true);
+    expect(text.includes('three or more')).toBe(true);
+    // Delegated work is where the list goes missing.
+    expect(text.includes('subagents')).toBe(true);
+});
+
+test('with only TodoWrite, it asks for that instead', async () => {
+    const text = trackingNudge(['Bash', 'TodoWrite']);
+    expect(text.includes('TodoWrite')).toBe(true);
+    expect(text.includes('TaskCreate')).toBe(false);
+});
+
+test('with the task tools behind ToolSearch, it says how to load them', async () => {
+    const text = trackingNudge(['Bash', 'ToolSearch']);
+    expect(text.includes('select:TaskCreate,TaskUpdate')).toBe(true);
+});
+
+test('with nothing to keep a list with, it asks for nothing', async () => {
+    expect(trackingNudge(['Bash', 'Read'])).toBe('');
+    expect(trackingNudge([])).toBe('');
+    expect(trackingNudge(undefined)).toBe('');
+});
+
+test('the same tools give the same words every time, so the prompt cache is not disturbed', async () => {
+    expect(trackingNudge(['TaskCreate', 'TaskUpdate'])).toBe(trackingNudge(['TaskCreate', 'TaskUpdate']));
+});
+
+test('the words asked of Claude contain no long dash', async () => {
+    for (const tools of [['TaskCreate', 'TaskUpdate'], ['TodoWrite'], ['ToolSearch']]) {
+        expect(trackingNudge(tools).includes(String.fromCharCode(8212))).toBe(false);
+    }
+});
+
+// ---- through the real hooks
+
+function hookOf(h, event, matcherTest) {
+    return h.hooks.find((x) => x.event === event && (!matcherTest || matcherTest(x.matcher)));
+}
+
+test('the prompt gets one section added last, in the session half of the cache', async () => {
+    const h = await sidebarSession({});
+    await h.say('track on');
+    const hook = hookOf(h, 'prompt.compose');
+    const base = { sections: [{ id: 'intro', text: 'a', scope: 'shared' }, { id: 'tools', text: 'b', scope: 'shared' }] };
+    const out = await hook.handler(h.ctx, { tools: ['TaskCreate', 'TaskUpdate'] }, async () => base);
+    expect(out.sections.length).toBe(3);
+    const added = out.sections[2];
+    expect(added.id).toBe(TRACK_SECTION);
+    expect(added.scope).toBe('session');
+    expect(added.text.includes('TaskCreate')).toBe(true);
+    // The engine's own sections come through untouched and in order.
+    expect(out.sections[0].id).toBe('intro');
+    expect(out.sections[1].id).toBe('tools');
+});
+
+test('it is not added twice, and not when switched off', async () => {
+    const h = await sidebarSession({});
+    const hook = hookOf(h, 'prompt.compose');
+    await h.say('track on');
+    const once = await hook.handler(h.ctx, { tools: ['TodoWrite'] }, async () => ({ sections: [] }));
+    const twice = await hook.handler(h.ctx, { tools: ['TodoWrite'] }, async () => once);
+    expect(twice.sections.length).toBe(1);
+
+    await h.say('track off');
+    const off = await hook.handler(h.ctx, { tools: ['TodoWrite'] }, async () => ({ sections: [] }));
+    expect(off.sections.length).toBe(0);
+    await h.say('track on');
+});
+
+test('a session with nothing to keep a list with is left alone', async () => {
+    const h = await sidebarSession({});
+    await h.say('track on');
+    const out = await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash'] }, async () => ({ sections: [] }));
+    expect(out.sections.length).toBe(0);
+});
+
+test('an answer with no sections is passed on as it came', async () => {
+    const h = await sidebarSession({});
+    await h.say('track on');
+    const weird = { not: 'sections' };
+    const out = await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['TodoWrite'] }, async () => weird);
+    expect(out).toBe(weird);
+});
+
+test('the mod does not touch how the task tools are placed', async () => {
+    // A tool.describe answer of isDeferred: false is run but not honoured for a
+    // built-in tool, so a hook for it would only be surface for nothing.
+    const h = await sidebarSession({});
+    expect(h.hooks.filter((x) => x.event === 'tool.describe').length).toBe(0);
+});
+
+test('/hud track says what it did and what it will do', async () => {
+    const h = await sidebarSession({});
+    const off = (await h.say('track off')).text;
+    expect(off.includes('Plan tracking off')).toBe(true);
+    expect(off.includes('Nothing is added to the prompt')).toBe(true);
+    const on = (await h.say('track on')).text;
+    expect(on.includes('Plan tracking on')).toBe(true);
+    expect(on.includes('three or more steps')).toBe(true);
+    expect((await h.say('track')).text.includes('Plan tracking is on')).toBe(true);
+});
+
+test('/hud plan says whether Claude is being asked to keep a task list', async () => {
+    const h = await sidebarSession({});
+    await h.say('track on');
+    const on = (await h.say('plan')).text;
+    expect(on.includes('plan tracking: on')).toBe(true);
+    await h.say('track off');
+    expect((await h.say('plan')).text.includes('plan tracking: off')).toBe(true);
+    await h.say('track on');
+});
+
+test('plan tracking is kept for next session like the other switches', async () => {
+    const saved = {};
+    const h = await sidebarSession({});
+    h.ctx.store = { get: async (k) => saved[k], set: async (k, v) => { saved[k] = v; } };
+    await h.say('track off');
+    expect(saved.prefs.trackOn).toBe(false);
+    await h.say('track on');
+    expect(saved.prefs.trackOn).toBe(true);
+});
+
+test('a restarted session finds its plan again, from the transcript', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.session.messages = async () => [
+        asst(create('a', '1'), create('b', '2'), create('c', '3')),
+        asst(update('1', 'completed')),
+    ];
+    await h.start();
+    const tree = await h.pane('desktop');
+    expect(hasKey(tree, 'card-progress')).toBe(true);
+    expect((await h.say('plan')).text.includes('1/3 done')).toBe(true);
+    // The counts come from the replay, so /hud plan is not blank after a reload.
+    expect((await h.say('plan')).text.includes('TaskCreate 3')).toBe(true);
+});
+
+test('a session that starts empty has no plan, even if one was showing', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.session.messages = async () => [asst(create('a', '1'), create('b', '2'))];
+    await h.start();
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
+
+    // /clear: the same module, a session with nothing in it.
+    h.ctx.session.messages = async () => [];
+    await h.start();
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(false);
+});
+
+test('an unreadable transcript leaves the plan as it was', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.session.messages = async () => [asst(create('a', '1'), create('b', '2'))];
+    await h.start();
+    h.ctx.session.messages = async () => { throw new Error('no transcript'); };
+    await h.start();
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
+});
+
+test('a subagent writing its own todo list does not become the bar', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.session.messages = async () => [];
+    await h.start();
+    const todo = hookOf(h, 'tool.call', (m) => m && m.tool === 'TodoWrite');
+    const list = [{ content: 'a', status: 'pending', activeForm: 'a' }, { content: 'b', status: 'pending', activeForm: 'b' }];
+    await todo.handler(h.ctx, { tool: 'TodoWrite', todos: list, agentId: 'sub-1' }, h.next);
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(false);
+    await todo.handler(h.ctx, { tool: 'TodoWrite', todos: list }, h.next);
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
+});
+
+test('a todo list cut to one item takes the old bar away', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.session.messages = async () => [];
+    await h.start();
+    const todo = hookOf(h, 'tool.call', (m) => m && m.tool === 'TodoWrite');
+    const two = [{ content: 'a', status: 'pending', activeForm: 'a' }, { content: 'b', status: 'pending', activeForm: 'b' }];
+    await todo.handler(h.ctx, { tool: 'TodoWrite', todos: two }, h.next);
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
+    await todo.handler(h.ctx, { tool: 'TodoWrite', todos: [two[0]] }, h.next);
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(false);
+});
+
+// =============================================== the heads-up reads real transcript rows
+
+test('a transcript row carries its words as text, and the heads-up reads that', async () => {
+    const rows = [
+        { role: 'user', text: 'please change the retry logic', toolUses: [] },
+        { role: 'assistant', text: 'I changed the retry logic and updated the config.', toolUses: [] },
+    ];
+    const text = flatten(rows);
+    expect(text.includes('Developer: please change the retry logic')).toBe(true);
+    expect(text.includes('Assistant: I changed the retry logic')).toBe(true);
+    // The older shape still reads.
+    expect(flatten([{ role: 'user', content: 'older shape here' }]).includes('older shape here')).toBe(true);
+});
+
+test('a transcript of real rows is long enough to build a heads-up request from', async () => {
+    const long = 'The retry logic now backs off exponentially and the config default changed. '.repeat(6);
+    const rows = [
+        { role: 'user', text: 'tighten the retries', toolUses: [] },
+        { role: 'assistant', text: long, toolUses: [] },
+    ];
+    expect(buildHeadsPrompt(rows)).not.toBe(null);
+});
+
+// ================================================================ the sidebar, in full
+//
+// Every card, and every press. The builder is pure, so each is checked as a
+// tree; the presses are the functions the caller put in the data, and the
+// tests below the line run them through the real hooks.
+
+const withSelect = { ...factories, Select: elOf('Select') };
+
+function find(tree, key) {
+    let found = null;
+    walk(tree, (n) => { if (n.key === key && !found) found = n; });
+    return found;
+}
+
+const fullData = (over) => ({
+    model: 'opus 5.5', worst: 'watch', pinned: false, routingOn: true, reason: 'deep work', held: false,
+    readings: [reading('ctx', 'Ctx', 15), reading('session', 'Session', 58, { note: '1.8x pace, dry in 2h' }), reading('week', 'Week', 30)],
+    contextDetail: '151.0k of 1.0m tokens',
+    projections: { session: 'on track to run dry in 2h', week: 'on track for 60% by reset' },
+    session: { cost: '$1.84', age: '42m' },
+    stats: { turns: 12, input: '1.2m', output: '84.0k', cacheHit: 91.4, average: '1m5s', last: '40s' },
+    plan: { total: 4, done: 1, doing: 1, percent: 25, donePercent: 25, reachedPercent: 50, complete: false, label: 'Doing two' },
+    planItems: [
+        { content: 'one', status: 'completed' },
+        { content: 'two', activeForm: 'Doing two', status: 'in_progress' },
+        { content: 'third-task', status: 'pending' },
+        { content: 'fourth-task', status: 'pending' },
+    ],
+    agents: [{ name: 'general', status: 'running', startedAt: Date.now() - 20000, tokens: 5000 }], agentShares: [1],
+    headsNote: 'The retry default changed and the docs still say three.',
+    suggestions: ['Run the tests', 'Update the docs'],
+    guard: { on: true, seen: 9, flagged: [{ kind: 'rm', text: 'This deletes 40 files under build.', outcome: 'cancelled' }] },
+    tiers: { fast: 'haiku 5.5', base: 'sonnet 5.5', deep: 'opus 5.5', top: 'fable 5.1' },
+    tierIds: { fast: 'claude-haiku-5-5', base: 'claude-sonnet-5-5', deep: 'claude-opus-5-5' },
+    models: [{ value: 'claude-haiku-5-5', label: 'haiku 5.5' }, { value: 'claude-opus-5-5', label: 'opus 5.5' }],
+    log: [{ tier: 'deep', short: 'opus 5.5', signals: ['refactor', 'plan'], text: 'refactor the router' }],
+    switches: [
+        { key: 'routing', label: 'Routing', hint: 'h1', on: true },
+        { key: 'suggest', label: 'Follow-ups', hint: 'h2', on: true },
+        { key: 'know', label: 'Heads up', hint: 'h3', on: false },
+        { key: 'blast', label: 'Blast radius', hint: 'h4', on: true },
+        { key: 'confirm', label: 'Ask near the limit', hint: 'h5', on: true },
+        { key: 'track', label: 'Plan tracking', hint: 'h6', on: true },
+    ],
+    collapsed: {},
+    ...over,
+});
+
+test('a fully populated sidebar has every card, in the order that matters', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    const order = tree.children.map((c) => c.key).filter((k) => typeof k === 'string' && k.startsWith('card-'));
+    expect(JSON.stringify(order)).toBe(JSON.stringify([
+        'card-hud', 'card-heads', 'card-usage', 'card-progress', 'card-agents', 'card-next',
+        'card-activity', 'card-routing', 'card-guard', 'card-models', 'card-settings',
+    ]));
+});
+
+test('no two elements in the whole sidebar share a key', async () => {
+    const tree = buildPanel(withSelect, fullData({ collapsed: {} }));
+    const seen = {};
+    let dup = '';
+    walk(tree, (n) => {
+        if (typeof n.key !== 'string') return;
+        if (seen[n.key]) dup = n.key;
+        seen[n.key] = true;
+    });
+    expect(dup).toBe('');
+});
+
+test('every text in a fully populated sidebar says how it wraps, and no gauge has a fixed width', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    let bare = 0;
+    let fixed = 0;
+    walk(tree, (n) => {
+        if (n.type === 'Text' && !n.wrap) bare += 1;
+        // A fixed width would clip in a narrow sidebar; the picture sizes itself.
+        if (n.type === 'Svg' && (n.width !== undefined || n.height !== undefined)) fixed += 1;
+    });
+    expect(bare).toBe(0);
+    expect(fixed).toBe(0);
+});
+
+test('the header says what the session has cost, how long it has run and its turns', async () => {
+    const text = textsOf(buildPanel(withSelect, fullData()));
+    expect(text.includes('$1.84  ·  42m  ·  12 turns')).toBe(true);
+});
+
+test('the header says nothing about cost when none is known', async () => {
+    const tree = buildPanel(withSelect, fullData({ session: { cost: '', age: '' }, stats: { turns: 0 } }));
+    expect(hasKey(tree, 'hd-facts')).toBe(false);
+});
+
+test('a pinned model offers one press back to auto, and an unpinned one does not', async () => {
+    let went = 0;
+    const pinned = buildPanel(withSelect, fullData({ pinned: true, onAuto: () => { went += 1; } }));
+    expect(textsOf(pinned).includes('pinned')).toBe(true);
+    find(pinned, 'hd-auto').onPress();
+    expect(went).toBe(1);
+    expect(hasKey(buildPanel(withSelect, fullData({ pinned: false, onAuto: () => undefined })), 'hd-auto')).toBe(false);
+});
+
+test('a held planning job says why it is on a smaller model', async () => {
+    expect(textsOf(buildPanel(withSelect, fullData({ held: true }))).includes('Held back to spare')).toBe(true);
+    expect(textsOf(buildPanel(withSelect, fullData({ held: false }))).includes('Held back')).toBe(false);
+});
+
+test('context says how many tokens, and no other gauge does', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    expect(textsOf(find(tree, 'u-ctx')).includes('151.0k of 1.0m tokens')).toBe(true);
+    expect(textsOf(find(tree, 'u-week')).includes('tokens')).toBe(false);
+});
+
+test('each window says where it is heading, and a dry one is coloured', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    expect(textsOf(find(tree, 'u-session')).includes('on track to run dry in 2h')).toBe(true);
+    expect(textsOf(find(tree, 'u-week')).includes('on track for 60% by reset')).toBe(true);
+    // The calm projection is quiet; the dry one is not.
+    expect(!!find(tree, 'u-p-session').color).toBe(true);
+    expect(!!find(tree, 'u-p-week').color).toBe(false);
+});
+
+test('a pace note is still shown when there is no projection to give', async () => {
+    const tree = buildPanel(withSelect, fullData({ projections: {} }));
+    expect(textsOf(find(tree, 'u-session')).includes('1.8x pace, dry in 2h')).toBe(true);
+});
+
+test('the plan lists the work in hand, then what is waiting, then what is done', async () => {
+    const text = textsOf(buildPanel(withSelect, fullData()));
+    // Distinct names: 'three' and 'one' are found inside other cards' text and prove nothing.
+    expect(text.indexOf('third-task') < text.indexOf('Done')).toBe(true);
+    expect(text.indexOf('Doing two') < text.indexOf('third-task')).toBe(true);
+});
+
+test('only the last few finished items are listed, and the rest are counted', async () => {
+    const items = [];
+    for (let i = 0; i < 8; i += 1) items.push({ content: 'finished ' + i, status: 'completed' });
+    items.push({ content: 'still going', activeForm: 'Going', status: 'in_progress' });
+    const plan = { total: 9, done: 8, doing: 1, percent: 88, donePercent: 88, reachedPercent: 100, complete: false, label: 'Going' };
+    const text = textsOf(buildPanel(withSelect, fullData({ plan, planItems: items })));
+    expect(text.includes('finished 7')).toBe(true);
+    expect(text.includes('finished 0')).toBe(false);
+    expect(text.includes('and 5 earlier')).toBe(true);
+});
+
+test('a heads-up has its own card with a dismiss, and none without a note', async () => {
+    let dismissed = 0;
+    const tree = buildPanel(withSelect, fullData({ onDismissHeads: () => { dismissed += 1; } }));
+    expect(textsOf(find(tree, 'card-heads')).includes('The retry default changed')).toBe(true);
+    find(tree, 'hh-x').onPress();
+    expect(dismissed).toBe(1);
+    expect(hasKey(buildPanel(withSelect, fullData({ headsNote: null })), 'card-heads')).toBe(false);
+});
+
+test('each follow-up is a button that sends exactly its own words', async () => {
+    const sent = [];
+    const tree = buildPanel(withSelect, fullData({ onSuggestion: (t) => { sent.push(t); } }));
+    find(tree, 'n-1').onPress();
+    find(tree, 'n-0').onPress();
+    expect(JSON.stringify(sent)).toBe(JSON.stringify(['Update the docs', 'Run the tests']));
+    expect(hasKey(buildPanel(withSelect, fullData({ suggestions: [] })), 'card-next')).toBe(false);
+});
+
+test('the activity card reports the turns, the tokens and the cache', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    const text = textsOf(find(tree, 'card-activity'));
+    for (const want of ['12', '1.2m', '84.0k', '91%', '1m5s', '40s']) expect(text.includes(want)).toBe(true);
+    expect(hasKey(tree, 'ac-cache-g')).toBe(true);
+});
+
+test('the activity card is left out until there is a turn, and has no cache row without a figure', async () => {
+    expect(hasKey(buildPanel(withSelect, fullData({ stats: { turns: 0 } })), 'card-activity')).toBe(false);
+    const noCache = buildPanel(withSelect, fullData({ stats: { turns: 2, input: '5', output: '5', cacheHit: null, average: '', last: '' } }));
+    expect(hasKey(noCache, 'card-activity')).toBe(true);
+    expect(hasKey(noCache, 'ac-cache')).toBe(false);
+});
+
+test('routing says why each recent prompt went where it did', async () => {
+    const text = textsOf(find(buildPanel(withSelect, fullData()), 'card-routing'));
+    expect(text.includes('deep')).toBe(true);
+    expect(text.includes('refactor, plan')).toBe(true);
+});
+
+test('routing with nothing decided yet says so, and routing off says that', async () => {
+    const empty = textsOf(buildPanel(withSelect, fullData({ log: [] })));
+    expect(empty.includes('Nothing routed yet')).toBe(true);
+    const off = textsOf(buildPanel(withSelect, fullData({ routingOn: false })));
+    expect(off.includes('Routing is off')).toBe(true);
+});
+
+test('the guard card counts what it checked and says what you chose', async () => {
+    const tree = buildPanel(withSelect, fullData({ collapsed: {} }));
+    const text = textsOf(find(tree, 'card-guard'));
+    expect(text.includes('9')).toBe(true);
+    expect(text.includes('This deletes 40 files under build.')).toBe(true);
+    expect(text.includes('you cancelled it')).toBe(true);
+});
+
+test('a command you ran is marked as run, and one nobody was asked about says so', async () => {
+    const ran = textsOf(buildPanel(withSelect, fullData({ guard: { on: true, seen: 1, flagged: [{ text: 'x', outcome: 'ran' }] }, collapsed: {} })));
+    expect(ran.includes('you ran it')).toBe(true);
+    const passed = textsOf(buildPanel(withSelect, fullData({ guard: { on: true, seen: 1, flagged: [{ text: 'x', outcome: 'passed' }] }, collapsed: {} })));
+    expect(passed.includes('went to the usual prompt')).toBe(true);
+});
+
+test('the guard card folded still says how many it stopped on, and off says off', async () => {
+    const folded = textsOf(buildPanel(withSelect, fullData({ collapsed: { guard: true } })));
+    expect(folded.includes('1 flagged')).toBe(true);
+    const off = textsOf(buildPanel(withSelect, fullData({ guard: { on: false, seen: 0, flagged: [] }, collapsed: {} })));
+    expect(off.includes('Off.')).toBe(true);
+});
+
+test('each tier has a picker holding the model it is on, and picking one says which tier', async () => {
+    const picked = [];
+    const tree = buildPanel(withSelect, fullData({ collapsed: {}, onTier: (tier, id) => { picked.push([tier, id]); } }));
+    expect(find(tree, 'm-fast').value).toBe('claude-haiku-5-5');
+    expect(find(tree, 'm-deep').value).toBe('claude-opus-5-5');
+    find(tree, 'm-base').onSelect('claude-opus-5-5');
+    expect(JSON.stringify(picked)).toBe(JSON.stringify([['base', 'claude-opus-5-5']]));
+});
+
+test('a surface with no picker still shows the tiers as text', async () => {
+    const tree = buildPanel(factories, fullData({ collapsed: {} }));
+    expect(hasKey(tree, 'm-fast')).toBe(true);
+    expect(find(tree, 'm-fast').type).toBe('Box');
+});
+
+test('each switch is a button that names itself when pressed', async () => {
+    const pressed = [];
+    const tree = buildPanel(withSelect, fullData({ onSwitch: (k) => { pressed.push(k); } }));
+    for (const k of ['routing', 'suggest', 'know', 'blast', 'confirm', 'track']) find(tree, 'sw-b-' + k).onPress();
+    expect(JSON.stringify(pressed)).toBe(JSON.stringify(['routing', 'suggest', 'know', 'blast', 'confirm', 'track']));
+});
+
+test('a switch says whether it is on, and the card counts how many are', async () => {
+    const tree = buildPanel(withSelect, fullData());
+    expect(textsOf(find(tree, 'sw-know')).includes('off')).toBe(true);
+    expect(textsOf(find(tree, 'sw-blast')).includes('on')).toBe(true);
+    expect(textsOf(find(tree, 'card-settings')).includes('5 of 6 on')).toBe(true);
+});
+
+// ---- the presses, through the real hooks
+
+async function setFolded(h, key, probe, folded) {
+    const tree = await h.pane('desktop');
+    const isFolded = !hasKey(tree, probe);
+    if (isFolded !== folded) await find(tree, 'b-' + key).onPress();
+}
+
+async function livePane(extra) {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
+    h.ctx.ui.resolve = () => withSelect;
+    h.ctx.session.messages = async () => [];
+    if (extra) await extra(h);
+    await h.start();
+    return h;
+}
+
+test('pressing a switch flips the same setting /hud flips', async () => {
+    const h = await livePane();
+    await h.say('suggest on');
+    const tree = await h.pane('desktop');
+    await find(tree, 'sw-b-suggest').onPress();
+    expect((await h.say('suggest')).text.includes('Suggestions are off')).toBe(true);
+    await find(await h.pane('desktop'), 'sw-b-suggest').onPress();
+    expect((await h.say('suggest')).text.includes('Suggestions are on')).toBe(true);
+});
+
+test('every switch flips its own setting and nothing else', async () => {
+    const h = await livePane();
+    const ask = { know: 'know', blast: 'blast', confirm: 'confirm', track: 'track', suggest: 'suggest' };
+    const word = { know: 'Heads up is', blast: 'Blast radius is', confirm: 'Asking near the limit is', track: 'Plan tracking is', suggest: 'Suggestions are' };
+    for (const k of Object.keys(ask)) await h.say(k + ' on');
+
+    for (const k of Object.keys(ask)) {
+        await find(await h.pane('desktop'), 'sw-b-' + k).onPress();
+        for (const other of Object.keys(ask)) {
+            const text = (await h.say(ask[other])).text;
+            const expected = other === k ? 'off' : 'on';
+            expect(text.includes(word[other] + ' ' + expected)).toBe(true);
+        }
+        await find(await h.pane('desktop'), 'sw-b-' + k).onPress();
+    }
+});
+
+test('the routing switch turns routing off and on again', async () => {
+    const h = await livePane();
+    await h.say('on');
+    await find(await h.pane('desktop'), 'sw-b-routing').onPress();
+    expect(textsOf(await h.pane('desktop')).includes('manual')).toBe(true);
+    await find(await h.pane('desktop'), 'sw-b-routing').onPress();
+    expect(textsOf(await h.pane('desktop')).includes('auto')).toBe(true);
+});
+
+test('a switch pressed is kept for next time', async () => {
+    const saved = {};
+    const h = await livePane(async (live) => { live.ctx.store = { get: async (k) => saved[k], set: async (k, v) => { saved[k] = v; } }; });
+    await h.say('blast on');
+    await find(await h.pane('desktop'), 'sw-b-blast').onPress();
+    expect(saved.prefs.blastOn).toBe(false);
+    await find(await h.pane('desktop'), 'sw-b-blast').onPress();
+    expect(saved.prefs.blastOn).toBe(true);
+});
+
+test('a switch that fails to save still flips', async () => {
+    const h = await livePane(async (live) => { live.ctx.store = { get: async () => undefined, set: async () => { throw new Error('disk full'); } }; });
+    await h.say('know on');
+    await find(await h.pane('desktop'), 'sw-b-know').onPress();
+    expect((await h.say('know')).text.includes('Heads up is off')).toBe(true);
+    await h.say('know on');
+});
+
+test('picking a model for a tier changes that tier', async () => {
+    const h = await livePane();
+    // Folded by default, so open it the way a person would.
+    await setFolded(h, 'models', 'm-top', false);
+    const tree = await h.pane('desktop');
+    const before = find(tree, 'm-fast').value;
+    const other = before === 'claude-opus-5-5' ? 'claude-haiku-5-5' : 'claude-opus-5-5';
+    await find(tree, 'm-fast').onSelect(other);
+    expect(find(await h.pane('desktop'), 'm-fast').value).toBe(other);
+    await find(await h.pane('desktop'), 'm-fast').onSelect(before);
+    expect(find(await h.pane('desktop'), 'm-fast').value).toBe(before);
+    await setFolded(h, 'models', 'm-top', true);
+});
+
+test('a model picked by hand shows as pinned, and one press gives routing back', async () => {
+    const h = await livePane();
+    await hookOf(h, 'classic.PreModelSwitch').handler(h.ctx, {}, h.next);
+    const pinned = await h.pane('desktop');
+    expect(hasKey(pinned, 'hd-auto')).toBe(true);
+    await find(pinned, 'hd-auto').onPress();
+    expect(hasKey(await h.pane('desktop'), 'hd-auto')).toBe(false);
+});
+
+test('folding a card is kept across redraws', async () => {
+    const h = await livePane();
+    await setFolded(h, 'models', 'm-top', true);
+    const before = await h.pane('desktop');
+    expect(hasKey(before, 'm-fast')).toBe(false);
+    await find(before, 'b-models').onPress();
+    expect(hasKey(await h.pane('desktop'), 'm-fast')).toBe(true);
+    await find(await h.pane('desktop'), 'b-models').onPress();
+    expect(hasKey(await h.pane('desktop'), 'm-fast')).toBe(false);
+});
+
+// ---- the guard, through the real Bash hook
+
+async function guardedRun(h, answer, command) {
+    h.ctx.ui.ask = async () => { if (answer === 'throw') throw new Error('nobody to ask'); return answer; };
+    h.ctx.process = { run: async () => ({ exitCode: 0, stdout: 'a\nb\nc\n' }) };
+    const hook = hookOf(h, 'tool.call', (m) => m && m.tool === 'Bash');
+    return hook.handler(h.ctx, { tool: 'Bash', command }, h.next);
+}
+
+test('a destructive command you ran is remembered as run, with the number that was shown', async () => {
+    const h = await livePane();
+    await h.say('blast on');
+    await guardedRun(h, 'Run it', 'git clean -fd');
+    await setFolded(h, 'guard', 'g-seen', false);
+    const text = textsOf(find(await h.pane('desktop'), 'card-guard'));
+    expect(text.includes('This deletes 3 untracked paths')).toBe(true);
+    expect(text.includes('you ran it')).toBe(true);
+    await setFolded(h, 'guard', 'g-seen', true);
+});
+
+test('one you cancelled is remembered as cancelled, and the call is refused', async () => {
+    const h = await livePane();
+    await h.say('blast on');
+    const out = await guardedRun(h, 'Cancel', 'git clean -fd');
+    expect(typeof out.deny).toBe('string');
+    await setFolded(h, 'guard', 'g-seen', false);
+    expect(textsOf(find(await h.pane('desktop'), 'card-guard')).includes('you cancelled it')).toBe(true);
+    await setFolded(h, 'guard', 'g-seen', true);
+});
+
+test('with nobody to ask, it is remembered as not asked and the call goes on', async () => {
+    const h = await livePane();
+    await h.say('blast on');
+    const out = await guardedRun(h, 'throw', 'git clean -fd');
+    expect(out.deny).toBe(undefined);
+    await setFolded(h, 'guard', 'g-seen', false);
+    expect(textsOf(find(await h.pane('desktop'), 'card-guard')).includes('went to the usual prompt')).toBe(true);
+    await setFolded(h, 'guard', 'g-seen', true);
+});
+
+test('the command itself is never kept anywhere the sidebar can show it', async () => {
+    const h = await livePane();
+    await h.say('blast on');
+    await guardedRun(h, 'Run it', 'git clean -fd && echo TOPSECRETTOKEN');
+    await setFolded(h, 'guard', 'g-seen', false);
+    const shown = textsOf(await h.pane('desktop'));
+    // Flagged, so the absence below is not just a command nobody looked at.
+    expect(shown.includes('This deletes')).toBe(true);
+    expect(shown.includes('TOPSECRETTOKEN')).toBe(false);
+    await setFolded(h, 'guard', 'g-seen', true);
+});
+
+// ---- what the strip leaves to the sidebar
+
+test('with the sidebar showing, a heads-up and the follow-ups are in it and not above the prompt', async () => {
+    const h = await livePane();
+    await h.say('know on');
+    await h.say('suggest on');
+    const long = 'The retry logic now backs off exponentially and the config default changed from three to five. '.repeat(8);
+    h.ctx.session.messages = async () => [
+        { role: 'user', text: 'tighten the retries', toolUses: [] },
+        { role: 'assistant', text: long, toolUses: [] },
+    ];
+    const replies = ['Run the retry tests\nUpdate the docs\nAdd a backoff test', 'The default changed but the docs still say three.'];
+    h.ctx.model = { complete: async () => ({ isAnswered: true, text: replies.shift() || 'NONE' }) };
+    h.ctx.prompt = { submit: () => undefined };
+    const done = hookOf(h, 'turn.complete');
+    // Three turns, so the heads-up check is due.
+    for (let i = 0; i < 3; i += 1) {
+        replies.splice(0, replies.length, 'Run the retry tests\nUpdate the docs\nAdd a backoff test', 'The default changed but the docs still say three.');
+        await done.handler(h.ctx, { answer: long, isAborted: false, durationMs: 1000, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }, async () => ({ text: long }));
+    }
+    const side = await h.pane('desktop');
+    expect(hasKey(side, 'card-heads')).toBe(true);
+    expect(hasKey(side, 'card-next')).toBe(true);
+
+    const band = await h.band('desktop');
+    expect(hasKey(band, 'hud-heads')).toBe(false);
+    expect(hasKey(band, 'hud-next')).toBe(false);
+});
+
+test('with no sidebar showing, the strip keeps its heads-up and follow-ups', async () => {
+    const h = await sidebarSession({ surfaces: ['desktop'], placed: false });
+    h.ctx.session.messages = async () => [];
+    await h.say('know on');
+    await h.say('suggest on');
+    const long = 'The retry logic now backs off exponentially and the config default changed from three to five. '.repeat(8);
+    h.ctx.session.messages = async () => [
+        { role: 'user', text: 'tighten the retries', toolUses: [] },
+        { role: 'assistant', text: long, toolUses: [] },
+    ];
+    h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'The default changed but the docs still say three.' }) };
+    const done = hookOf(h, 'turn.complete');
+    for (let i = 0; i < 3; i += 1) await done.handler(h.ctx, { answer: long, isAborted: false, durationMs: 1000 }, async () => ({ text: long }));
+    const band = await h.band('desktop');
+    expect(hasKey(band, 'hud-heads')).toBe(true);
+});
+
+test('a finished turn adds to the activity, and a subagent turn does not', async () => {
+    const h = await livePane();
+    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'empty-reply' }) };
+    h.ctx.prompt = { submit: () => undefined };
+    const done = hookOf(h, 'turn.complete');
+    const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 90, cache_creation_input_tokens: 0 };
+    await done.handler(h.ctx, { answer: 'ok', isAborted: false, durationMs: 4000, usage }, async () => ({ text: 'ok' }));
+    const one = textsOf(find(await h.pane('desktop'), 'card-activity'));
+    expect(one.includes('90%')).toBe(true);
+    await done.handler(h.ctx, { answer: 'ok', isAborted: false, durationMs: 4000, usage, agentId: 'sub-1' }, async () => ({ text: 'ok' }));
+    const two = find(await h.pane('desktop'), 'ac-turns');
+    expect(textsOf(two).includes('1')).toBe(true);
+    expect(textsOf(two).includes('2')).toBe(false);
+});
+
+// ============================================================ review fixes
+
+test('an update that errored does not become a task, or change one', async () => {
+    const tasks = [{ id: '1', subject: 'a', activeForm: '', status: 'pending' }, { id: '2', subject: 'b', activeForm: '', status: 'pending' }];
+    const refused = { isError: true, text: 'No task with id 99' };
+    expect(applyTaskTool(tasks, 'TaskUpdate', { taskId: '99', status: 'completed' }, refused).length).toBe(2);
+    const same = applyTaskTool(tasks, 'TaskUpdate', { taskId: '1', status: 'completed' }, refused);
+    expect(same.find((t) => t.id === '1').status).toBe('pending');
+    // And a create that errored made nothing.
+    expect(applyTaskTool(tasks, 'TaskCreate', { subject: 'c' }, refused).length).toBe(2);
+});
+
+test('a subagent working through its own tasks does not become the bar', async () => {
+    const h = await livePane();
+    const hook = hookOf(h, 'tool.call', (m) => m && Array.isArray(m.tool) ? m.tool.includes('TaskCreate') : (m && m.tool === 'TaskCreate'));
+    const made = (id) => async () => ({ result: { task: { id, subject: 'sub ' + id } } });
+    await hook.handler(h.ctx, { tool: 'TaskCreate', subject: 'sub 1', agentId: 'sub-1' }, made('1'));
+    await hook.handler(h.ctx, { tool: 'TaskCreate', subject: 'sub 2', agentId: 'sub-1' }, made('2'));
+    expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(false);
+    expect((await h.say('plan')).text.includes('TaskCreate 0')).toBe(true);
+});
+
+test('the follow-ups are about the last prompt even when the model was picked by hand', async () => {
+    const h = await livePane();
+    await hookOf(h, 'classic.PreModelSwitch').handler(h.ctx, {}, h.next);
+    await h.say('suggest on');
+    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'please refactor the zebra module' }, h.next);
+
+    let asked = '';
+    h.ctx.model = { complete: async (req) => { asked += String(req.prompt); return { isAnswered: false, reason: 'empty-reply' }; } };
+    h.ctx.prompt = { submit: () => undefined };
+    await hookOf(h, 'turn.complete').handler(h.ctx, { answer: 'I refactored it.', isAborted: false, durationMs: 1000 }, async () => ({ text: 'x' }));
+    expect(asked.includes('zebra')).toBe(true);
+    await h.say('auto');
+});
+
+// ============================================ the wording that was tried on real sessions
+
+test('it is an instruction given before the first tool call, not a suggestion', async () => {
+    // A softer "you could keep a task list" was tried and a real session ignored it.
+    const text = trackingNudge(['TaskCreate', 'TaskUpdate', 'ToolSearch']);
+    expect(text.includes('Before your first tool call')).toBe(true);
+    expect(text.includes('required')).toBe(true);
+});
+
+test('when the task tools are listed but their schemas are behind ToolSearch, it says how to load them', async () => {
+    // Claude Code lists them among the offered tools and still defers their schemas.
+    const text = trackingNudge(['TaskCreate', 'TaskUpdate', 'ToolSearch']);
+    expect(text.includes('select:TaskCreate,TaskUpdate')).toBe(true);
+});
+
+test('when ToolSearch is not there it does not tell Claude to use it', async () => {
+    expect(trackingNudge(['TaskCreate', 'TaskUpdate']).includes('ToolSearch')).toBe(false);
+    expect(trackingNudge(['TodoWrite']).includes('ToolSearch')).toBe(false);
+});
+
+test('TodoWrite is used where it is the list that exists, even with ToolSearch about', async () => {
+    const text = trackingNudge(['TodoWrite', 'ToolSearch']);
+    expect(text.includes('TodoWrite')).toBe(true);
+    expect(text.includes('TaskCreate')).toBe(false);
+});
+
+test('it tells Claude that the person is watching a bar, and to skip small things', async () => {
+    const text = trackingNudge(['TaskCreate', 'TaskUpdate']);
+    expect(text.includes('progress bar')).toBe(true);
+    expect(text.includes('single small edits')).toBe(true);
 });

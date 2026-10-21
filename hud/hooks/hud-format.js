@@ -362,36 +362,33 @@ export function layout(state, columns, opts = {}) {
 }
 
 /**
- * The plan's bar in characters, for the terminal.
+ * The plan's bar in characters, for the terminal, the way savvy-progress
+ * draws it: solid blocks for what is finished and a light shade for what is
+ * left, the whole bar in the plan's colour, no brackets. A soft violet while
+ * the work is under way, green once it is done.
  *
- * The same two layers the desktop draws, in the only two weights a terminal
- * has: solid blocks for work finished, a lighter shade for work in hand, and
- * the track for what has not been started. Blue throughout, because progress
- * is not a limit - a job at 90% is nearly done, not nearly in trouble, and
- * the green-amber-red of the quota bars would say the opposite.
+ * Anything finished shows at least one block, or a long plan's first item
+ * looks like nothing happening; and the bar is never full until the last
+ * item is, so a job at 97% does not look finished.
  */
 export function planBar(plan, ascii = false, cells = 16) {
-    const inner = Math.max(1, cells - 2);
-    const clamp = (n) => Math.max(0, Math.min(100, Number(n) || 0));
-    const done = clamp(plan && plan.donePercent);
-    const reached = Math.max(done, clamp(plan && plan.reachedPercent));
+    const width = Math.max(1, Math.round(cells));
+    const total = (plan && plan.total) || 0;
+    const done = (plan && plan.done) || 0;
+    const complete = !!(plan && plan.complete);
+    const ratio = complete ? 1 : total ? done / total : 0;
 
-    // Anything begun shows at least one cell, or a long plan's first item
-    // looks like nothing happening at all.
-    const cellsFor = (pct) => (pct > 0 ? Math.max(1, Math.round((pct / 100) * inner)) : 0);
-    const doneCells = Math.min(inner, cellsFor(done));
-    const reachedCells = Math.min(inner, Math.max(doneCells, cellsFor(reached)));
+    let filled = Math.round(width * ratio);
+    if (done > 0 && filled === 0) filled = 1;
+    if (!complete && filled >= width && width > 1) filled = width - 1;
 
-    const block = ascii ? '#' : '█';
-    const partial = ascii ? '=' : '▒';
-    const dot = ascii ? '.' : '·';
-
-    const pieces = [{ text: '[', dim: true }];
-    if (doneCells) pieces.push({ text: block.repeat(doneCells), color: 'blue' });
-    if (reachedCells > doneCells) {
-        pieces.push({ text: partial.repeat(reachedCells - doneCells), color: 'blue', dim: true });
-    }
-    if (reachedCells < inner) pieces.push({ text: dot.repeat(inner - reachedCells), dim: true });
-    pieces.push({ text: ']', dim: true });
+    const color = complete ? PLAN_DONE : PLAN_ACCENT;
+    const pieces = [];
+    if (filled) pieces.push({ text: (ascii ? '#' : '\u2588').repeat(filled), color });
+    if (width > filled) pieces.push({ text: (ascii ? '-' : '\u2591').repeat(width - filled), color });
     return pieces;
 }
+
+/** The plan's colours, as savvy-progress has them. Kept here so the terminal needs nothing from the svg file. */
+export const PLAN_ACCENT = '#8f8cf4';
+export const PLAN_DONE = '#5fbf8f';

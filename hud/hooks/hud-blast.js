@@ -176,3 +176,31 @@ export function warningFor(assessment) {
     }
     return 'This one cannot be undone by any means.';
 }
+
+/** How many guarded commands the sidebar remembers. */
+export const GUARD_KEEP = 6;
+
+/** What became of a command the guard stopped on. */
+export const RAN = 'ran';
+export const CANCELLED = 'cancelled';
+export const PASSED = 'passed';
+
+/**
+ * Remember one command the guard looked at, newest last, keeping a few.
+ *
+ * Only the sentence the guard already showed you is kept: the kind of command
+ * and what it would have touched, such as "This deletes 1,240 files under
+ * build." The command line itself is never stored, since it can carry a
+ * token or a password and nothing here needs it.
+ *
+ * `outcome` is `RAN` when you chose to run it, `CANCELLED` when you did not,
+ * and `PASSED` when nobody could be asked and it went to the usual prompt.
+ */
+export function recordGuard(log, entry) {
+    const next = (log || []).concat([{
+        kind: String((entry && entry.kind) || ''),
+        text: String((entry && entry.text) || ''),
+        outcome: (entry && entry.outcome) || PASSED,
+    }]);
+    return next.length > GUARD_KEEP ? next.slice(next.length - GUARD_KEEP) : next;
+}

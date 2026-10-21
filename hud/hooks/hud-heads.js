@@ -92,7 +92,8 @@ export function flatten(messages) {
         const role = m.role === 'assistant' ? 'Assistant' : (m.role === 'user' ? 'Developer' : null);
         if (!role) continue;
 
-        const body = textOf(m.content);
+        // A transcript row carries its words as `text`; the older shapes as `content`.
+        const body = textOf(m.text !== undefined ? m.text : m.content);
         if (body) out.push(role + ': ' + body);
     }
     return out.join('\n');

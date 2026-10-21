@@ -91,3 +91,28 @@ export function paceMark(pace) {
     if (!pace) return null;
     return pace.elapsed;
 }
+
+/** Minutes as the short form the strip uses: 45m, 3h, 2h10m. */
+function leftText(minutes) {
+    const m = Math.max(0, Math.round(minutes));
+    return m >= 60 ? Math.floor(m / 60) + 'h' + (m % 60 ? (m % 60) + 'm' : '') : m + 'm';
+}
+
+/**
+ * Where the window will end up if the spend carries on as it has, in words.
+ *
+ * `paceText` stays quiet unless you are overspending, because a strip that
+ * comments on every turn stops being read. The sidebar has the room to say it
+ * all the time, and the projection is the useful part: "on track for 38% by
+ * reset" is the answer to "can I keep going like this", whether or not the
+ * answer is alarming.
+ *
+ * Says nothing in the first 5% of a window, where one early prompt makes the
+ * rate swing wildly, and nothing at zero use, where there is no rate.
+ */
+export function projectionText(pace) {
+    if (!pace || !(pace.used > 0) || pace.elapsed < 0.05) return '';
+    if (pace.dryInMinutes !== null) return 'on track to run dry in ' + leftText(pace.dryInMinutes);
+    const projected = Math.round((pace.used / pace.elapsed) * 100);
+    return 'on track for ' + Math.min(100, projected) + '% by reset';
+}
