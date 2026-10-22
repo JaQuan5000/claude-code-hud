@@ -159,11 +159,10 @@ Three features make their own model requests, and all are **on by default**. Eve
 |---|---|---|---|
 | Follow-up suggestions | After a turn that produced an answer | A trimmed slice of your prompt and the answer | `/hud suggest off` |
 | Heads-up | At most every few turns, and only after a substantial turn | The last ~2,400 characters of the conversation | `/hud know off` |
-| Estimated plan | During a job with no task list, at most twice a minute, and once when the turn ends | Your latest request, the descriptions of subagents sent, the **names** of files touched, and Claude's last reply, trimmed. Never a command, never a directory | `/hud estimate off` |
 
-All three go to your own model on your own account - the same conversation, to the same place it already goes - and all are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest`, `know` and `estimate` all off, the mod makes no requests at all.
+Both go to your own model on your own account - the same conversation, to the same place it already goes - and all are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest` and `know` both off, the mod makes no requests at all. The progress bar never makes one: it counts only what Claude writes down.
 
-If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These six switches (`suggest`, `know`, `blast`, `confirm`, `track`, `estimate`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
+If you would rather it never spoke to a model without being asked, run `/hud suggest off` and `/hud know off` once. These five switches (`suggest`, `know`, `blast`, `confirm`, `track`) are saved and are still as you left them the next time Claude Code opens. Routing itself is not saved: `/hud off` is for the task in front of you, and it comes back on next session.
 
 ## Tuning the routing on real data
 
@@ -185,35 +184,29 @@ While Claude works through a multi-step job, a progress bar shows how far along 
 ● Wiring the panel        █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
 ```
 
-Solid blocks are the work finished and the light shade is what is left, in a soft violet while the work is under way and green once it is done. In the desktop app the bar is a picture: a dithered fill that thickens towards its head, a faint layer for the task in hand, a tick where each task still ahead begins, and the count on a pill riding the head of the fill. The colours are deliberately not the quota bars' green-amber-red: those measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
+Solid blocks are the work finished, a medium shade is the step in hand, and the light shade is what is left, all in one periwinkle blue (savvy-progress's) and green once the job is done. **While Claude is working the bar is alive**: a lighter band runs along the finished part, the step in hand breathes between two shades, and the dot beside the title pulses. The moment its turn ends, or you interrupt it, everything stops and the title dims, so a bar standing still means nobody is working on it. In the desktop app the bar is a picture: a dithered fill that thickens towards its head, a faint layer for the task in hand, a tick where each task still ahead begins, and the count on a pill riding the head of the fill. The colours are deliberately not the quota bars' green-amber-red: those measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
 
-The total comes from Claude's own task list, the plan it writes before it starts and updates as each step lands, so nothing in the bar is estimated. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads both ways Claude keeps that list - the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
+The total comes from the steps Claude itself writes down before it starts and updates as each one lands. Nothing in the bar is estimated, and the mod never guesses a plan: no steps written, no bar. An earlier version asked a small model to work a plan out from the work and drew it with a tilde; it showed "4 of 9" under a finished answer with both numbers invented, so it was removed. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads three ways Claude can keep that list: the `progress` tool this mod adds (see [Plan tracking](#plan-tracking)), the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
 
 If you never see it, run `/hud plan`. It says how many task calls the mod has actually seen this session, whether a plan is being tracked, and which of the usual reasons applies: Claude is not keeping a task list for the job, or the plan is under two tasks or already finished. A short question has no plan, so it has no bar.
 
-The usual reason is the first. The bar can only count a list Claude writes down, and a long job carried out without one, most often one handed to subagents a step at a time, has nothing to count. That is not a fault in the bar, so the mod does something about it: see [Plan tracking](#plan-tracking).
+The usual reason is the first. The bar can only count a list Claude writes down, and a job carried out without one has nothing to count. That is not a fault in the bar, so the mod makes the list easy to write: see [Plan tracking](#plan-tracking).
 
 A restarted or resumed session finds its plan again. The mod reads the task calls back out of the transcript when it starts, so the bar is there straight away instead of after the next task call.
 
 ## Plan tracking
 
-Claude Code places its task tools (`TaskCreate`, `TaskUpdate`) behind ToolSearch, so a model has to go and fetch them before it can write a task, and in a long plan-driven session it often never does. That is how a whole session can go by without a single task being written, and so without a bar.
+Claude Code's own task tools (`TaskCreate`, `TaskUpdate`) are not reliable to count on. They sit behind ToolSearch, so a model has to go and fetch them first and in a long session often never does, and some sessions have none at all (a Claude Code 2.1.307 session on a server was found with neither those nor `TodoWrite`). Either way there is no list, and so no bar.
 
-So the mod adds one short note to the system prompt, after the engine's own sections: for a request of three or more steps, or a written plan being carried out, keep a task list (loading the task tools first if they are not loaded), tick each step as it is accepted, and keep it in the main conversation even when the steps go to subagents. It says nothing for a question or a small edit. It is the same words on every request, so the prompt cache pays for it once, and it makes no request of its own and sends nothing anywhere. `/hud track on` / `off` switches it and the reminder below, and with it off the bar shows only when Claude keeps a task list unprompted. A job already under way may need asking directly ("keep a task list for the rest of this"), since the note applies from the next request.
+So the mod adds a tool of its own, `progress` (it appears to Claude as `mcp__hud__progress`), and it is listed up front in every session instead of sitting behind ToolSearch. Claude calls it with every step of the job and a status for each, `todo`, `doing` or `done`, and again with the whole list each time a step starts or finishes. Its answer is `ok: 3/5 done`. Only the main conversation can write the job's steps: a subagent's call is ignored. A step with no words or an unknown status is dropped, and fewer than two steps is no plan.
+
+The mod also adds one short note to the system prompt, after the engine's own sections: for a request of three or more steps, or a written plan being carried out, report the steps (with the task tools where the session has them, and with `progress` where it has not), keep the list in the main conversation even when the steps go to subagents, and mark each one as it is accepted. It says nothing for a question or a small edit. It is the same words on every request, so the prompt cache pays for it once, and it makes no request of its own.
+
+Tried against a real Claude Code 2.1.307 session with no task tools: given a five-step job it called `progress` before its first step, once as each step started and once as it finished, and the bar counted 0/5 up to 5/5 and went when the last step did.
 
 **A reminder in the middle of a long job.** The note in the system prompt is enough for a new session and not for one that has been working for hours, whose own history of hundreds of calls with no task list in them outweighs a paragraph at the top. So when eight tool calls in a row have gone by with no plan, the mod attaches one sentence to the next tool result, where the model reads it as part of the work: no task list exists, so the bar the person is watching is empty; write at least three separate tasks, one per step, and tick them as they finish. It says so at most four times for one job, forty calls apart, and never once a plan exists. It never changes a result and is never shown to you. Tried against a real session resumed with a long task-less history: without it the model made no tasks, with it the model wrote three on the next step.
 
 Plan tracking is a prompt-level feature, so it does not run where an organization manages Claude Code and restricts plugins from changing prompts; there the bar still works for any plan Claude writes.
-
-## An estimated plan
-
-Asking Claude to keep a task list works for a fresh session and not reliably for a long one. A model with hours of task-less history carries on as it has been, and was seen ignoring both the note in the system prompt and the reminder beside a tool result. A bar that appears only when the model cooperates is mostly not there, so the mod can work the plan out from the work.
-
-After about five tool calls with no task list, then every half minute or so while the job runs, and once more the moment the turn ends, the cheap model is shown what is visible from outside: your latest request, the subagents sent (their descriptions say what each was for), the names of the files edited, and Claude's last reply. It answers with the steps of the whole job and which are done, or `NONE` when this is a question or a small change. The bar then draws it with a tilde before the count (`Tasks ~4/9`), and the sidebar says it is an estimate.
-
-What is sent is narrow on purpose. A command is never included, since a command can carry a token or a password. A file is named by its last path segment only. A step that was done stays done, so the bar does not go backwards, and a list that shares almost nothing with the last one is taken as a new job. A task list Claude writes itself always wins, and the estimate gives way to it at once. `/hud estimate off` removes it and the requests with it.
-
-Tried against the real session that never showed a bar: a moment between small edits was answered `NONE`, and a moment in the middle of a multi-plan run came back as a nine-step plan, six done and three under way, which matched the work.
 
 ## The desktop sidebar
 
@@ -312,7 +305,6 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud panel` / `panel off` | The desktop sidebar: open it, or close it and put the strip back |
 | `/hud plan` | What the progress bar has seen, and why it is or is not showing |
 | `/hud track on` / `off` | Asking Claude to keep a task list for long jobs, so the bar has something to count |
-| `/hud estimate on` / `off` | Working a plan out from the work itself when Claude keeps none |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |
 | `/hud set <tier> <model>` | Points one tier at a different model for this session |
@@ -373,17 +365,17 @@ The flagship is `fable 5.1` at $10/$50 per MTok against Opus 5.5 at $4/$20, and 
 
 ## What it can reach
 
-Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses eighteen calls:
+Mods are not sandboxed, so this is worth being able to check before you install one. The whole mod uses twenty calls:
 
 ```
-$.agent.list        $.clock.after       $.command.register  $.model.complete
-$.process.run       $.prompt.submit     $.session.messages  $.session.model
-$.session.surfaces  $.session.usage     $.store.get         $.store.set
-$.ui.ask            $.ui.close          $.ui.invalidate     $.ui.open
-$.ui.panes          $.ui.resolve
+$.agent.list        $.clock.after       $.clock.every       $.command.register
+$.model.complete    $.process.run       $.prompt.submit     $.session.messages
+$.session.model     $.session.surfaces  $.session.usage     $.store.get
+$.store.set         $.tool.register     $.ui.ask            $.ui.close
+$.ui.invalidate     $.ui.open           $.ui.panes          $.ui.resolve
 ```
 
-No filesystem, no environment variables, no MCP. The only storage is `$.store`, which holds five on/off switches (`suggest`, `know`, `blast`, `confirm` and `track`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, and `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off. Two hooks change what the model is given and nothing else: one adds the plan-tracking note to the system prompt, and one attaches the mid-job reminder to a tool result. Both are fixed text, both go with `/hud track off`, and neither sends anything anywhere. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
+No filesystem, no environment variables, no MCP server. The only storage is `$.store`, which holds five on/off switches (`suggest`, `know`, `blast`, `confirm` and `track`) so they are still as you left them next session. It holds nothing about your prompts, your tasks or your usage. Two of these deserve a sentence each rather than a footnote: `$.process.run` exists only for the blast-radius measurement, under the constraints described above, `$.model.complete` is the single request made on your behalf - the follow-ups and the heads-up check, both on the cheap model, both switchable off - `$.tool.register` adds the one `progress` tool that the bar is fed through, and `$.clock.every` is the five-frames-a-second tick that moves the bar, which does nothing unless a bar is on screen and Claude is working. Two hooks change what the model is given and nothing else: one adds the plan-tracking note to the system prompt, and one attaches the mid-job reminder to a tool result. Both are fixed text, both go with `/hud track off`, and neither sends anything anywhere. No `bin/` directory, no MCP servers and no monitors, so nothing runs at install time. `claude plugin validate ./hud` prints the calls it finds, so you can confirm that rather than taking it on trust.
 
 ## What it does not do
 

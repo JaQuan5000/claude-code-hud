@@ -21,13 +21,11 @@ import { readUsage, contextPercentOf, limitsOf, epochSecondsOf, asPercent, descr
 import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, leadNote,
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
 import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport,
-    replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText,
+    replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText, HUD_TOOL, HUD_TOOL_NAME, stepsFrom,
     REMIND_AFTER, REMIND_EVERY, REMIND_MAX } from '../hooks/hud-progress.js';
 import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
-import { planBar, PLAN_ACCENT, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
+import { planBar, planBarFrame, PLAN_ACCENT, PLAN_GLOW, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
 import { planSvg } from '../hooks/hud-svg.js';
-import { buildPlanPrompt, parsePlan, stabilise, toTodos, inferDue, isNone,
-    INFER_EVERY_CALLS, INFER_MIN_GAP_MS, INFER_TURN_TOOL_CALLS } from '../hooks/hud-infer.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
@@ -1471,7 +1469,7 @@ test('the terminal bar is savvy-progress\'s: solid blocks, a light shade, exactl
 test('the terminal bar is the plan\'s violet while under way, never a quota colour', async () => {
     const colors = planBar(quarterPlan(), false, 16).map((x) => x.color);
     expect(colors.every((c) => c === PLAN_ACCENT)).toBe(true);
-    expect(PLAN_ACCENT).toBe('#8f8cf4');
+    expect(PLAN_ACCENT).toBe('#7a7cf8');
 });
 
 test('and green once it is finished, and full', async () => {
@@ -2751,10 +2749,20 @@ test('with the task tools behind ToolSearch, it says how to load them', async ()
     expect(text.includes('select:TaskCreate,TaskUpdate')).toBe(true);
 });
 
-test('with nothing to keep a list with, it asks for nothing', async () => {
-    expect(trackingNudge(['Bash', 'Read'])).toBe('');
-    expect(trackingNudge([])).toBe('');
-    expect(trackingNudge(undefined)).toBe('');
+test('with nothing to keep a list with, it asks for the mod own tool', async () => {
+    for (const tools of [['Bash', 'Read'], [], undefined]) {
+        const text = trackingNudge(tools);
+        expect(text.includes(HUD_TOOL)).toBe(true);
+        expect(text.includes('ToolSearch')).toBe(false);
+        expect(text.includes('todo, doing or done')).toBe(true);
+    }
+});
+
+test('where ToolSearch is the only way in, it names the hud tool for when it finds nothing', async () => {
+    const text = trackingNudge(['Bash', 'ToolSearch']);
+    expect(text.includes('select:TaskCreate,TaskUpdate')).toBe(true);
+    expect(text.includes('If ToolSearch finds no such tools')).toBe(true);
+    expect(text.includes(HUD_TOOL)).toBe(true);
 });
 
 test('the same tools give the same words every time, so the prompt cache is not disturbed', async () => {
@@ -2803,11 +2811,12 @@ test('it is not added twice, and not when switched off', async () => {
     await h.say('track on');
 });
 
-test('a session with nothing to keep a list with is left alone', async () => {
+test('a session with no task tools is asked to use the hud tool', async () => {
     const h = await sidebarSession({});
     await h.say('track on');
     const out = await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash'] }, async () => ({ sections: [] }));
-    expect(out.sections.length).toBe(0);
+    expect(out.sections.length).toBe(1);
+    expect(out.sections[0].text.includes(HUD_TOOL)).toBe(true);
 });
 
 test('an answer with no sections is passed on as it came', async () => {
@@ -3690,11 +3699,11 @@ test('the reminder says how to load the task tools, and what to do with them', a
     expect(text.includes('No task list exists')).toBe(true);
 });
 
-test('it asks for TodoWrite where that is the list there is, and for nothing where there is none', async () => {
+test('it asks for TodoWrite where that is the list there is, and for the hud tool tool where there is none', async () => {
     const todos = reminderText(['Bash', 'TodoWrite']);
     expect(todos.includes('TodoWrite')).toBe(true);
     expect(todos.includes('TaskCreate')).toBe(false);
-    expect(reminderText(['Bash', 'Read'])).toBe('');
+    expect(reminderText(['Bash', 'Read']).includes(HUD_TOOL)).toBe(true);
 });
 
 test('when the tools are not known yet it assumes the interactive ones', async () => {
@@ -3803,16 +3812,19 @@ test('once a plan exists the reminders stop, and a finished one lets the next jo
     }
 });
 
-test('a session with nothing to keep a list with is never reminded', async () => {
+test('a session with no task tools is reminded to use the hud tool', async () => {
     const h = await sidebarSession({ surfaces: ['terminal'] });
     h.ctx.session.messages = async () => [];
     await h.say('track on');
     await h.start();
     await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash', 'Read'] }, async () => ({ sections: [] }));
     const hook = callHook(h);
-    for (let i = 0; i < REMIND_AFTER * 2; i += 1) {
-        expect((await hook.handler(h.ctx, { tool: 'Bash' }, ok())).context).toBe(undefined);
+    let said = '';
+    for (let i = 0; i < REMIND_AFTER; i += 1) {
+        const r = await hook.handler(h.ctx, { tool: 'Bash' }, ok());
+        if (r.context && r.context.length) said = r.context.join(' ');
     }
+    expect(said.includes(HUD_TOOL)).toBe(true);
 });
 
 test('a new session starts the count over', async () => {
@@ -3826,466 +3838,273 @@ test('a new session starts the count over', async () => {
 });
 
 
-// ======================================================= a plan worked out from the work
-//
-// Claude does not always keep a task list, and a model with hours of task-less
-// history ignores both the system prompt and a reminder. So when there is none
-// the cheap model is shown the work and asked for the steps. What is sent is
-// narrow on purpose (no commands, file names only), and what comes back is
-// drawn as the estimate it is.
+// ======================================================= a bar that is real and moves while Claude works
 
-const asst2 = (text, ...uses) => ({ role: 'assistant', text, toolUses: uses });
-const ask = (text) => ({ role: 'user', text, toolUses: [] });
+const planOf = (statuses) => progressOf(statuses.map((s, i) => ({ content: 'step ' + i, status: s })));
 
-test('the request names the job, the subagents sent and the files touched', async () => {
-    const prompt = buildPlanPrompt([
-        ask('wire the sidebar, then the tests'),
-        asst2('on it', { tool: 'Agent', input: { description: 'Implement Plan 09 Task 2 isolation suite' } },
-            { tool: 'Edit', input: { file_path: '/home/me/project/src/app.js' } },
-            { tool: 'Skill', input: { skill: 'superpowers:writing-plans' } }),
-    ], null);
-    expect(prompt.includes('wire the sidebar, then the tests')).toBe(true);
-    expect(prompt.includes('Implement Plan 09 Task 2 isolation suite')).toBe(true);
-    expect(prompt.includes('edited: app.js')).toBe(true);
-    expect(prompt.includes('superpowers:writing-plans')).toBe(true);
+test('a bar standing still has no motion in it: an idle frame is the same at every tick', async () => {
+    const plan = planOf(['completed', 'completed', 'in_progress', 'pending', 'pending', 'pending']);
+    const a = JSON.stringify(planBarFrame(plan, { cells: 20, working: false, tick: 0 }));
+    for (const tick of [1, 2, 3, 7, 100, 12345]) {
+        expect(JSON.stringify(planBarFrame(plan, { cells: 20, working: false, tick }))).toBe(a);
+    }
 });
 
-test('a command is never sent, whatever it carries', async () => {
-    const prompt = buildPlanPrompt([
-        ask('deploy it'),
-        asst2('running', { tool: 'Bash', input: { command: 'curl -H "Authorization: Bearer SECRETTOKEN123" https://x.example' } },
-            { tool: 'Read', input: { file_path: '/etc/shadow-ish/secret.txt' } },
-            { tool: 'WebFetch', input: { url: 'https://private.example/?key=ABC' } }),
-    ], null);
-    expect(prompt.includes('SECRETTOKEN123')).toBe(false);
-    expect(prompt.includes('curl')).toBe(false);
-    expect(prompt.includes('shadow-ish')).toBe(false);
-    expect(prompt.includes('private.example')).toBe(false);
-    // The tools are counted, so the work is still shown as busy.
-    expect(prompt.includes('Bash x1')).toBe(true);
+test('and a working bar moves: a lighter band runs along what is finished', async () => {
+    const plan = planOf(['completed', 'completed', 'completed', 'in_progress', 'pending', 'pending']);
+    const frames = new Set();
+    for (let tick = 0; tick < 30; tick += 1) {
+        const pieces = planBarFrame(plan, { cells: 24, working: true, tick });
+        expect(pieces.map((p) => p.text).join('').length).toBe(24);
+        frames.add(JSON.stringify(pieces));
+        // The band is the glow colour and only ever over solid blocks.
+        for (const p of pieces) if (p.color === PLAN_GLOW) expect(/^█+$/.test(p.text)).toBe(true);
+    }
+    expect(frames.size > 6).toBe(true);
+    // Somewhere in the loop the band is on the bar, and somewhere it is not.
+    const lit = [...frames].filter((f) => f.includes(PLAN_GLOW)).length;
+    expect(lit > 0 && lit < frames.size).toBe(true);
 });
 
-test('a file is named by its last segment only, never its directory', async () => {
-    const prompt = buildPlanPrompt([
-        ask('edit'),
-        asst2('', { tool: 'Write', input: { file_path: 'C:\\Users\\jane\\Secret Client\\notes.md' } },
-            { tool: 'Edit', input: { file_path: '/home/dev/app/docs/plan.md' } }),
-    ], null);
-    expect(prompt.includes('notes.md')).toBe(true);
-    expect(prompt.includes('plan.md')).toBe(true);
-    expect(prompt.includes('Secret Client')).toBe(false);
-    expect(prompt.includes('/home/dev')).toBe(false);
-    expect(prompt.includes('jane')).toBe(false);
+test('the step in hand is shown as a shade between finished and not started, and it breathes', async () => {
+    const plan = planOf(['completed', 'in_progress', 'pending', 'pending']);
+    const idle = planBarFrame(plan, { cells: 16, working: false, tick: 0 }).map((p) => p.text).join('');
+    expect(idle).toBe('█'.repeat(4) + '▒'.repeat(4) + '░'.repeat(8));
+    const seen = new Set();
+    for (let tick = 0; tick < 12; tick += 1) {
+        const t = planBarFrame(plan, { cells: 16, working: true, tick }).map((p) => p.text).join('');
+        seen.add(t.slice(4, 8));
+    }
+    expect(seen.has('▓'.repeat(4))).toBe(true);
+    expect(seen.has('▒'.repeat(4))).toBe(true);
 });
 
-test('nothing to go on means no request at all', async () => {
-    expect(buildPlanPrompt([], null)).toBe(null);
-    expect(buildPlanPrompt(undefined, null)).toBe(null);
-    expect(buildPlanPrompt([{ role: 'user', text: '', toolUses: [] }], null)).toBe(null);
+test('a step in hand is at least one cell, and the bar is never full until the job is', async () => {
+    const todos = [{ content: 'a', status: 'in_progress' }];
+    for (let i = 0; i < 39; i += 1) todos.push({ content: 'x' + i, status: 'pending' });
+    const text = planBarFrame(progressOf(todos), { cells: 16 }).map((p) => p.text).join('');
+    expect(text.startsWith('▒')).toBe(true);
+    const nearly = [];
+    for (let i = 0; i < 39; i += 1) nearly.push({ content: 'x' + i, status: 'completed' });
+    nearly.push({ content: 'last', status: 'in_progress' });
+    const full = planBarFrame(progressOf(nearly), { cells: 16, working: true, tick: 5 }).map((p) => p.text).join('');
+    expect(full.length).toBe(16);
+    expect(full.endsWith('░') || full.endsWith('▒') || full.endsWith('▓')).toBe(true);
 });
 
-test('the engine\'s own wrapper notes are not the person\'s request', async () => {
-    const prompt = buildPlanPrompt([
-        ask('<system-reminder>Attribution for commits goes here</system-reminder> please add the header bar'),
-        asst2('ok', { tool: 'Edit', input: { file_path: 'a.js' } }),
-    ], null);
-    expect(prompt.includes('please add the header bar')).toBe(true);
-    expect(prompt.includes('Attribution for commits')).toBe(false);
+test('a finished job is a solid green bar, and the plain-text bar has no band to move', async () => {
+    const done = planOf(['completed', 'completed']);
+    expect(JSON.stringify(planBarFrame(done, { cells: 10, working: true, tick: 3 }))).toBe(JSON.stringify([{ text: '█'.repeat(10), color: PLAN_DONE }]));
+    const plain = planBarFrame(planOf(['completed', 'in_progress', 'pending']), { ascii: true, cells: 12, working: true, tick: 4 });
+    expect(plain.every((p) => /^[#=+-]+$/.test(p.text))).toBe(true);
 });
 
-test('a subagent hand-back is not mistaken for the request', async () => {
-    const prompt = buildPlanPrompt([
-        ask('build the whole account system'),
-        asst2('dispatching', { tool: 'Agent', input: { description: 'Implement Task 1' } }),
-        ask('Another Claude session sent a message: <agent-message from="x"> report </agent-message>'),
-    ], null);
-    expect(prompt.includes('build the whole account system')).toBe(true);
-    expect(prompt.includes('agent-message')).toBe(false);
+// The blue has to survive a terminal that reports only sixteen colours.
+// A terminal like that has every colour rounded to one of sixteen, by which of
+// red, green and blue are past half (this is the rounding Claude Code's colour
+// library does). #8f8cf4 has all three past half, so it came out bright white:
+// the cream badge and bar of a Claude Code under tmux with TERM=screen.
+const ansi16 = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const v = Math.round(Math.max(r, g, b) / 255 * 100 / 50);
+    if (v === 0) return 30;
+    const n = 30 + ((Math.round(b / 255) << 2) | (Math.round(g / 255) << 1) | Math.round(r / 255));
+    return v === 2 ? n + 60 : n;
+};
+
+test('the bar and the badge round to bright blue on a sixteen colour terminal, not to white', async () => {
+    expect(ansi16('#8f8cf4')).toBe(97);
+    expect(ansi16(PLAN_ACCENT)).toBe(94);
+    expect(ansi16(BADGE_BG)).toBe(94);
+    expect(PLAN_ACCENT).toBe(BADGE_BG);
 });
 
-test('the list from last time is shown so the same job keeps the same steps', async () => {
-    const prev = { title: 'j', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }] };
-    const prompt = buildPlanPrompt([ask('go'), asst2('x', { tool: 'Agent', input: { description: 'routes' } })], prev);
-    expect(prompt.includes('1. [done] design the schema')).toBe(true);
-    expect(prompt.includes('A step that was done stays done')).toBe(true);
-});
-
-test('only so much is sent, however long the session has been', async () => {
-    const uses = [];
-    for (let i = 0; i < 200; i += 1) uses.push({ tool: 'Agent', input: { description: 'step number ' + i } });
-    const prompt = buildPlanPrompt([ask('x'.repeat(5000)), asst2('y'.repeat(5000), ...uses)], null);
-    expect(prompt.length < 6000).toBe(true);
-    // The most recent work, not the oldest.
-    expect(prompt.includes('step number 199')).toBe(true);
-    expect(prompt.includes('step number 0\n')).toBe(false);
-});
-
-test('a plan is read out of an answer even when the model wraps it in words', async () => {
-    const raw = 'Here you go:\n```json\n{"title":"Account system","steps":[{"t":"schema","s":"done"},{"t":"routes","s":"in_progress"},{"t":"tests","s":"pending"}]}\n```';
-    const plan = parsePlan(raw);
-    expect(plan.title).toBe('Account system');
-    expect(plan.steps.length).toBe(3);
-    // The other spellings of a state are understood.
-    expect(plan.steps[1].s).toBe('doing');
-    expect(plan.steps[2].s).toBe('todo');
-});
-
-test('NONE, nonsense and a list too short to be a plan are all refused', async () => {
-    expect(parsePlan('NONE')).toBe(null);
-    expect(parsePlan('none, it is a question')).toBe(null);
-    expect(parsePlan('')).toBe(null);
-    expect(parsePlan('{"steps": "not a list"}')).toBe(null);
-    expect(parsePlan('{ broken json')).toBe(null);
-    expect(parsePlan('{"title":"t","steps":[{"t":"a","s":"done"},{"t":"b","s":"todo"}]}')).toBe(null);
-    expect(parsePlan(undefined)).toBe(null);
-    expect(isNone('NONE')).toBe(true);
-    expect(isNone('{"steps":[]}')).toBe(false);
-});
-
-test('a step with no name or an unknown state is dropped, not guessed at', async () => {
-    const plan = parsePlan('{"title":"t","steps":[{"t":"a","s":"done"},{"t":"","s":"done"},{"t":"b","s":"maybe"},{"t":"c","s":"todo"},{"t":"d","s":"doing"}]}');
-    expect(plan.steps.map((s) => s.t).join(',')).toBe('a,c,d');
-});
-
-test('a plan is held to a sensible size, and each step to a line', async () => {
-    const many = [];
-    for (let i = 0; i < 30; i += 1) many.push({ t: 'step ' + i + ' ' + 'x'.repeat(200), s: 'todo' });
-    const plan = parsePlan(JSON.stringify({ title: 'big', steps: many }));
-    expect(plan.steps.length).toBe(12);
-    expect(plan.steps.every((s) => s.t.length <= 70)).toBe(true);
-});
-
-test('a step that was done stays done when a later guess is less sure', async () => {
-    const before = { title: 'j', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }] };
-    const after = { title: 'j', steps: [{ t: 'design the schema', s: 'doing' }, { t: 'write the routes', s: 'doing' }, { t: 'add tests', s: 'todo' }, { t: 'deploy', s: 'todo' }] };
-    const merged = stabilise(before, after);
-    expect(merged.steps[0].s).toBe('done');
-    // New steps still arrive.
-    expect(merged.steps.length).toBe(4);
-});
-
-test('a list that shares almost nothing with the old one is a new job and replaces it', async () => {
-    const before = { title: 'a', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'done' }, { t: 'add tests', s: 'done' }] };
-    const after = { title: 'b', steps: [{ t: 'paint the fence', s: 'todo' }, { t: 'buy more paint', s: 'todo' }, { t: 'sand the gate', s: 'todo' }] };
-    const merged = stabilise(before, after);
-    expect(merged.title).toBe('b');
-    expect(merged.steps.every((s) => s.s === 'todo')).toBe(true);
-});
-
-test('one step that happens to match does not drag the new job along', async () => {
-    const before = { title: 'a', steps: [{ t: 'design the schema', s: 'done' }, { t: 'write the routes', s: 'done' }, { t: 'add tests', s: 'done' }] };
-    const after = { title: 'b', steps: [{ t: 'paint the fence', s: 'todo' }, { t: 'add tests', s: 'todo' }, { t: 'sand the gate', s: 'todo' }] };
-    // One of three shares words with the old list: a coincidence, not the same job.
-    expect(stabilise(before, after).steps[1].s).toBe('todo');
-});
-
-test('with no earlier list the new one is taken as it is', async () => {
-    const next = { title: 'x', steps: [{ t: 'a', s: 'todo' }, { t: 'b', s: 'todo' }, { t: 'c', s: 'todo' }] };
-    expect(stabilise(null, next)).toBe(next);
-    expect(stabilise(next, null)).toBe(null);
-});
-
-test('the steps become the todo list the bar already reads, and a bar from them', async () => {
-    const todos = toTodos({ steps: [{ t: 'a', s: 'done' }, { t: 'b', s: 'doing' }, { t: 'c', s: 'todo' }, { t: 'd', s: 'todo' }] });
-    expect(todos.map((t) => t.status).join(',')).toBe('completed,in_progress,pending,pending');
-    const plan = progressOf(todos);
-    expect(plan.total).toBe(4);
-    expect(plan.done).toBe(1);
-    expect(plan.label).toBe('b');
-});
-
-const dueArgs = (over) => ({ on: true, planned: false, busy: false, calls: 12, turnToolCalls: 0, turnEnded: false, lastAt: 0, now: 1e9, ...over });
-
-test('it looks after a stretch of work, and not before', async () => {
-    expect(inferDue(dueArgs({ calls: INFER_EVERY_CALLS - 1 }))).toBe(false);
-    expect(inferDue(dueArgs({ calls: INFER_EVERY_CALLS }))).toBe(true);
-});
-
-test('never with a plan of Claude\'s own, never while one is running, never when switched off', async () => {
-    expect(inferDue(dueArgs({ planned: true }))).toBe(false);
-    expect(inferDue(dueArgs({ busy: true }))).toBe(false);
-    expect(inferDue(dueArgs({ on: false }))).toBe(false);
-});
-
-test('and never more than once a minute', async () => {
-    expect(inferDue(dueArgs({ lastAt: 1e9 - INFER_MIN_GAP_MS + 1 }))).toBe(false);
-    expect(inferDue(dueArgs({ lastAt: 1e9 - INFER_MIN_GAP_MS }))).toBe(true);
-});
-
-test('a finished turn is a moment to look, if it did real work', async () => {
-    expect(inferDue(dueArgs({ calls: 0, turnEnded: true, turnToolCalls: INFER_TURN_TOOL_CALLS }))).toBe(true);
-    expect(inferDue(dueArgs({ calls: 0, turnEnded: true, turnToolCalls: INFER_TURN_TOOL_CALLS - 1 }))).toBe(false);
+test('and it is still a blue, not a grey: blue is the strongest channel by a long way', async () => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(PLAN_ACCENT.slice(i, i + 2), 16));
+    expect(b - Math.max(r, g) > 100).toBe(true);
 });
 
 // ---- through the real hooks
 
-const workMessages = () => [
-    ask('finish the account system'),
-    asst2('on it', { tool: 'Agent', input: { description: 'Implement Task 1 schema' } },
-        { tool: 'Agent', input: { description: 'Implement Task 2 routes' } }),
-];
-const PLAN_ANSWER = JSON.stringify({ title: 'Accounts', steps: [
-    { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'doing' }, { t: 'Task 3 tests', s: 'todo' }, { t: 'Task 4 deploy', s: 'todo' },
-] });
-
-async function estimateSession(answer) {
+async function barSession() {
     const h = await sidebarSession({ surfaces: ['terminal'] });
-    h.ctx.session.messages = async () => workMessages();
-    h.asked = [];
-    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: answer }; } };
-    await h.say('estimate on');
+    h.ctx.session.messages = async () => [];
+    h.registered = [];
+    h.ticks = [];
+    h.invalidated = 0;
+    h.ctx.tool = { register: async (def) => { h.registered.push(def); } };
+    h.ctx.clock = { after: () => undefined, every: (ms, fn) => { h.ticks.push({ ms, fn }); } };
+    h.ctx.ui.invalidate = () => { h.invalidated += 1; };
     await h.say('track on');
     await h.start();
-    // start() replays the transcript for a plan, which finds none here.
     return h;
 }
-const callsOf = async (h, n) => {
-    const hook = callHook(h);
-    for (let i = 0; i < n; i += 1) await hook.handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
-    await sleep2(30);
-};
-const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
-// Run fn as if two minutes had gone by, so the once-a-minute limit has
-// passed. Date.now itself cannot be reassigned under the test runner, so the
-// whole Date is swapped for one that reads two minutes ahead, and put back.
-const RealDate = Date;
-async function twoMinutesLater(fn) {
-    globalThis.Date = class extends RealDate { static now() { return RealDate.now() + 120000; } };
-    try { await fn(); } finally { globalThis.Date = RealDate; }
-}
 
-test('after a stretch of work with no plan the bar appears, marked as an estimate', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(h.asked.length).toBe(1);
-    expect(h.asked[0].model.length > 0).toBe(true);
-    const tree = await h.band('terminal');
-    const row = find(tree, 'hud-progress');
+const write = (h, steps) => hookOf(h, 'tool.call', (m) => m && m.tool === HUD_TOOL)
+    .handler(h.ctx, { tool: HUD_TOOL, steps }, async () => ({}));
+const barRow = async (h) => find(await h.band('terminal'), 'hud-progress');
+
+test('the mod registers a progress tool of its own, listed up front and not behind ToolSearch', async () => {
+    const h = await barSession();
+    expect(h.registered.length).toBe(1);
+    const def = h.registered[0];
+    expect(def.name).toBe(HUD_TOOL_NAME);
+    expect(HUD_TOOL).toBe('mcp__hud__progress');
+    expect(def.isDeferred).toBe(false);
+    expect(def.inputSchema.required.includes('steps')).toBe(true);
+    expect(def.inputSchema.properties.steps.items.properties.status.enum.join()).toBe('todo,doing,done');
+    expect(def.description.includes('single small edit')).toBe(true);
+});
+
+test('the steps Claude reports are the bar: real counts, no tilde', async () => {
+    const h = await barSession();
+    const out = await write(h, [{ title: 'Read the code', status: 'done' }, { title: 'Write the fix', status: 'doing' }, { title: 'Run the tests', status: 'todo' }]);
+    expect(out.result.startsWith('ok: 1/3')).toBe(true);
+    const row = await barRow(h);
     expect(!!row).toBe(true);
-    // A tilde before the count: a guess, drawn as a guess.
-    expect(textsOf(row).includes('Tasks ~1/4')).toBe(true);
+    const text = textsOf(row);
+    expect(text.includes('Tasks 1/3')).toBe(true);
+    expect(text.includes('~')).toBe(false);
+    expect(text.includes('Write the fix')).toBe(true);
 });
 
-test('the request goes to the cheap model and carries no command', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(h.asked[0].prompt.includes('Implement Task 2 routes')).toBe(true);
-    expect(h.asked[0].prompt.includes('ls')).toBe(false);
+test('the whole list is written each time, so the bar follows it step by step', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'doing' }, { title: 'b', status: 'todo' }, { title: 'c', status: 'todo' }]);
+    expect(textsOf(await barRow(h)).includes('Tasks 0/3')).toBe(true);
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }, { title: 'c', status: 'todo' }]);
+    expect(textsOf(await barRow(h)).includes('Tasks 1/3')).toBe(true);
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'done' }, { title: 'c', status: 'doing' }]);
+    expect(textsOf(await barRow(h)).includes('Tasks 2/3')).toBe(true);
+    // All done: a finished bar is a receipt and goes.
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'done' }, { title: 'c', status: 'done' }]);
+    expect(!!(await barRow(h))).toBe(false);
 });
 
-test('a plan Claude writes itself replaces the estimate', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    const create = hookOf(h, 'tool.call', (m) => m && m.tool === 'TaskCreate');
-    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'real one' }, async () => ({ result: { task: { id: 'e1', subject: 'real one' } } }));
-    await create.handler(h.ctx, { tool: 'TaskCreate', subject: 'real two' }, async () => ({ result: { task: { id: 'e2', subject: 'real two' } } }));
-    const row = find(await h.band('terminal'), 'hud-progress');
-    expect(textsOf(row).includes('Tasks ~')).toBe(false);
-    expect(textsOf(row).includes('Tasks 0/2')).toBe(true);
+test('one step is not a plan, and a subagent cannot write the main job\'s steps', async () => {
+    const h = await barSession();
+    const one = await write(h, [{ title: 'a', status: 'doing' }]);
+    expect(one.result.startsWith('ignored')).toBe(true);
+    expect(!!(await barRow(h))).toBe(false);
+    const sub = await hookOf(h, 'tool.call', (m) => m && m.tool === HUD_TOOL)
+        .handler(h.ctx, { tool: HUD_TOOL, agentId: 'a1', steps: [{ title: 'a', status: 'doing' }, { title: 'b', status: 'todo' }] }, async () => ({}));
+    expect(sub.result.startsWith('ignored')).toBe(true);
+    expect(!!(await barRow(h))).toBe(false);
 });
 
-test('a model that says there is no job clears the estimate', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
-    // A minute later, with the work over, it says so.
-    h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'NONE' }) };
-    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+test('a malformed call draws nothing and breaks nothing', async () => {
+    const h = await barSession();
+    for (const steps of [undefined, null, 'x', 5, [], [null, 3], [{ nope: 1 }, { nope: 2 }]]) {
+        const out = await write(h, steps);
+        expect(typeof out.result).toBe('string');
+    }
+    expect(!!(await barRow(h))).toBe(false);
 });
 
-test('an answer that cannot be read leaves the last good estimate alone', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'I am not sure what you mean' }) };
-    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+test('the task tools and the hud tool feed the same bar, and /hud plan counts both', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'todo' }]);
+    const text = (await h.say('plan')).text;
+    expect(text.includes('progress 1')).toBe(true);
+    expect(text.includes('plan: 1/2 done')).toBe(true);
 });
 
-test('a failed or refused request costs nothing and shows nothing', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    h.ctx.model = { complete: async () => { throw new Error('offline'); } };
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
-    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'api-error' }) };
-    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+test('a bar can be read back from the transcript after a restart', async () => {
+    const found = replayPlan([
+        { role: 'assistant', toolUses: [{ tool: HUD_TOOL, input: { steps: [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }, { title: 'c', status: 'todo' }] } }] },
+        { role: 'assistant', toolUses: [{ tool: HUD_TOOL, input: { steps: [{ title: 'a', status: 'done' }, { title: 'b', status: 'done' }, { title: 'c', status: 'doing' }] } }] },
+    ]);
+    expect(found.source).toBe('todos');
+    expect(found.counts.progress).toBe(2);
+    const plan = progressOf(found.todos);
+    expect(plan.done).toBe(2);
+    expect(plan.doing).toBe(1);
 });
 
-test('with the estimate switched off nothing is asked and nothing is drawn', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await h.say('estimate off');
-    await callsOf(h, INFER_EVERY_CALLS * 2);
-    expect(h.asked.length).toBe(0);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
-    await h.say('estimate on');
-});
-
-test('a subagent\'s calls do not start a look', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
+test('the bar never asks a model for anything: it counts what was written and guesses nothing', async () => {
+    const h = await barSession();
+    let asked = 0;
+    h.ctx.model = { complete: async () => { asked += 1; return { isAnswered: false, reason: 'x' }; } };
+    await hookOf(h, 'prompt.compose').handler(h.ctx, { tools: ['Bash'] }, async () => ({ sections: [] }));
     const hook = callHook(h);
-    for (let i = 0; i < INFER_EVERY_CALLS * 2; i += 1) await hook.handler(h.ctx, { tool: 'Bash', agentId: 'sub-1' }, ok());
-    await sleep2(30);
-    expect(h.asked.length).toBe(0);
+    for (let i = 0; i < 40; i += 1) await hook.handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
+    expect(asked).toBe(0);
+    // No steps written, so no bar, however much work was done.
+    expect(!!(await barRow(h))).toBe(false);
+    expect((await h.say('estimate on')).text.includes('estimate')).toBe(false);
 });
 
-test('one look at a time, however fast the calls come', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    let release = null;
-    let started = 0;
-    h.ctx.model = { complete: () => new Promise((resolve) => { started += 1; release = () => resolve({ isAnswered: true, text: PLAN_ANSWER }); }) };
-    const hook = callHook(h);
-    for (let i = 0; i < INFER_EVERY_CALLS * 3; i += 1) await hook.handler(h.ctx, { tool: 'Bash' }, ok());
-    await sleep2(30);
-    expect(started).toBe(1);
-    release();
-    await sleep2(30);
+test('Claude working moves the bar, and the end of its turn stops it', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }, { title: 'c', status: 'todo' }]);
+    const frame = h.ticks[0];
+    expect(frame.ms <= 250).toBe(true);
+    const before = h.invalidated;
+    // Idle: the clock ticks and nothing is redrawn.
+    await barRow(h);
+    frame.fn(); frame.fn();
+    expect(h.invalidated).toBe(before);
+    // A request goes out: the bar is alive.
+    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'please do the three things' }, h.next);
+    await barRow(h);
+    const working = h.invalidated;
+    frame.fn(); frame.fn(); frame.fn();
+    expect(h.invalidated).toBe(working + 3);
+    // Its answer lands: still again.
+    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'x' }) };
+    h.ctx.prompt = { submit: () => undefined };
+    await hookOf(h, 'turn.complete').handler(h.ctx, { answer: 'done', isAborted: false, durationMs: 1000 }, async () => ({ text: 'x' }));
+    const idle = h.invalidated;
+    frame.fn(); frame.fn();
+    expect(h.invalidated).toBe(idle);
 });
 
-test('the estimate shows in the sidebar with its tilde and a note saying why', async () => {
-    const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
-    h.ctx.ui.resolve = () => withSelect;
-    h.ctx.session.messages = async () => workMessages();
-    h.ctx.model = { complete: async () => ({ isAnswered: true, text: PLAN_ANSWER }) };
-    await h.say('estimate on');
-    await h.start();
-    await callsOf(h, INFER_EVERY_CALLS);
-    const tree = await h.pane('desktop');
-    expect(hasKey(tree, 'card-progress')).toBe(true);
-    expect(textsOf(find(tree, 'card-progress')).includes('~1/4')).toBe(true);
-    expect(hasKey(tree, 'p-est')).toBe(true);
+test('an aborted turn stops the bar too', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }]);
+    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'go' }, h.next);
+    await barRow(h);
+    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'x' }) };
+    h.ctx.prompt = { submit: () => undefined };
+    await hookOf(h, 'turn.complete').handler(h.ctx, { answer: '', isAborted: true, durationMs: 10 }, async () => ({ text: '' }));
+    const n = h.invalidated;
+    h.ticks[0].fn();
+    expect(h.invalidated).toBe(n);
 });
 
-test('/hud estimate says what it did, and /hud plan says where the estimate stands', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    expect((await h.say('estimate off')).text.includes('Estimated plan off')).toBe(true);
-    expect((await h.say('estimate on')).text.includes('Estimated plan on')).toBe(true);
-    expect((await h.say('estimate')).text.includes('Estimated plan is on')).toBe(true);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect((await h.say('plan')).text.includes('estimated plan: on, 1/4 steps')).toBe(true);
+test('while Claude works the terminal bar differs from frame to frame, and when idle it does not', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'done' }, { title: 'c', status: 'doing' }, { title: 'd', status: 'todo' }]);
+    const sig = async () => JSON.stringify(find(await h.band('terminal'), 'pg-bar'));
+    const idleA = await sig();
+    await sleep3(260);
+    expect(await sig()).toBe(idleA);
+    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'go' }, h.next);
+    const seen = new Set();
+    for (let i = 0; i < 8; i += 1) { seen.add(await sig()); await sleep3(210); }
+    expect(seen.size > 1).toBe(true);
 });
+const sleep3 = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test('the estimate is a switch like the others, and is kept for next time', async () => {
-    const saved = {};
-    const h = await sidebarSession({ surfaces: ['terminal'] });
-    h.ctx.store = { get: async (k) => saved[k], set: async (k, v) => { saved[k] = v; } };
-    await h.say('estimate off');
-    expect(saved.prefs.inferOn).toBe(false);
-    await h.say('estimate on');
-    expect(saved.prefs.inferOn).toBe(true);
-});
-
-// ---- the end of a job
-
-// Only the requests that work out a plan: a finished turn also asks for follow-ups.
-const looks = (h) => h.asked.filter((r) => String(r.prompt).includes('keep a progress bar honest')).length;
-
-const endTurn = async (h, answer = 'Done.') => {
-    await hookOf(h, 'turn.complete').handler(h.ctx, { answer, isAborted: false, durationMs: 1000 }, async () => ({ text: answer }));
-    await sleep2(40);
-};
-
-test('the bar shows from the fifth call of a job, not the twelfth', async () => {
-    expect(INFER_EVERY_CALLS <= 5).toBe(true);
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
-});
-
-test('when the turn ends the estimate is brought up to date at once, inside the gap between looks', async () => {
-    // The bug seen live: a 16-call job finished 18 seconds after the last look,
-    // the once-a-minute limit held the end-of-turn look back, and the bar sat at
-    // 40% under the finished answer.
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
-    const asked = looks(h);
-    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: JSON.stringify({ title: 'Accounts', steps: [
-        { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'done' }, { t: 'Task 3 tests', s: 'done' }, { t: 'Task 4 deploy', s: 'done' },
-    ] }) }; } };
-    await endTurn(h);
-    expect(looks(h)).toBe(asked + 1);
-    // Everything done is a receipt: the bar goes.
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
-});
-
-test('an estimate that cannot be brought up to date at the end of a turn is taken down, not left frozen', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
-    h.ctx.model = { complete: async () => { throw new Error('offline'); } };
-    await endTurn(h);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
-    // An answer that cannot be read is the same.
-    const g = await estimateSession(PLAN_ANSWER);
-    await callsOf(g, INFER_EVERY_CALLS);
-    g.ctx.model = { complete: async () => ({ isAnswered: true, text: 'no idea' }) };
-    await endTurn(g);
-    expect(hasKey(await g.band('terminal'), 'hud-progress')).toBe(false);
-});
-
-test('a job that is not finished keeps its bar across the end of a turn', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, INFER_EVERY_CALLS);
-    await endTurn(h, 'Which of the two do you want?');
-    const row = find(await h.band('terminal'), 'hud-progress');
-    expect(!!row).toBe(true);
-    expect(textsOf(row).includes('Tasks ~1/4')).toBe(true);
-});
-
-test('a turn that did little and left no estimate asks nothing', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await callsOf(h, 1);
-    const asked = looks(h);
-    await endTurn(h);
-    expect(looks(h)).toBe(asked);
-});
-
-test('with the estimate off the end of a turn asks nothing', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    await h.say('estimate off');
-    const asked = looks(h);
-    await callsOf(h, INFER_EVERY_CALLS);
-    await endTurn(h);
-    expect(looks(h)).toBe(asked);
-});
-
-test('a job of a few calls that ends inside the gap still gets its look', async () => {
-    // Five calls took a look that found nothing; three more and the turn ends
-    // seconds later. The end of the turn is not held back by the gap.
-    const h = await estimateSession('NONE');
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(looks(h)).toBe(1);
-    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: PLAN_ANSWER }; } };
-    await callsOf(h, 3);
-    expect(looks(h)).toBe(1);
-    await endTurn(h);
-    expect(looks(h)).toBe(2);
-});
-
-test('a turn that ends while a look is still out gets a second look afterwards', async () => {
-    const h = await estimateSession(PLAN_ANSWER);
-    const DONE = JSON.stringify({ title: 'Accounts', steps: [
-        { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'done' }, { t: 'Task 3 tests', s: 'done' }, { t: 'Task 4 deploy', s: 'done' },
+test('steps are read whichever way their status is spelled', async () => {
+    const steps = stepsFrom({ steps: [
+        { title: 'a', status: 'done' }, { title: 'b', status: 'In Progress' }, { title: 'c', status: 'in-progress' },
+        { title: 'd', status: 'in_progress' }, { title: 'e', status: 'Completed' }, { title: 'f', status: 'TODO' }, { title: 'g', status: 'pending' },
+        { title: '', status: 'done' }, { title: 'h', status: 'nonsense' }, { title: 'i' },
     ] });
-    let release = () => undefined;
-    let answerNow = false;
-    h.ctx.model = { complete: (req) => {
-        h.asked.push(req);
-        // Follow-up suggestions and the like are not what is being held.
-        if (!String(req.prompt).includes('keep a progress bar honest')) return Promise.resolve({ isAnswered: false, reason: 'skipped' });
-        if (answerNow) return Promise.resolve({ isAnswered: true, text: DONE });
-        return new Promise((resolve) => { release = () => resolve({ isAnswered: true, text: PLAN_ANSWER }); });
-    } };
-    await callsOf(h, INFER_EVERY_CALLS);
-    expect(looks(h)).toBe(1);
-    // The turn ends while that look has not come back.
-    await endTurn(h);
-    expect(looks(h)).toBe(1);
-    // It comes back showing the job half done; the look at the end of the turn now goes out and finds it finished.
-    answerNow = true;
-    release();
-    await sleep2(120);
-    expect(looks(h)).toBe(2);
-    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+    expect(steps.map((s) => s.content).join('')).toBe('abcdefg');
+    expect(steps.map((s) => s.status[0]).join('')).toBe('ciiicpp');
+});
+
+test('a step title is words only: control characters cannot reach the terminal, and it is capped', async () => {
+    const esc = String.fromCharCode(27);
+    const bell = String.fromCharCode(7);
+    const steps = stepsFrom({ steps: [
+        { title: 'Run' + esc + '[2J' + esc + ']0;owned' + bell + ' the tests', status: 'doing' },
+        { title: 'x'.repeat(500), status: 'todo' },
+    ] });
+    expect(steps.length).toBe(2);
+    expect(/[\u0000-\u001f\u007f-\u009f]/.test(steps[0].content)).toBe(false);
+    expect(steps[0].content.startsWith('Run')).toBe(true);
+    expect(steps[1].content.length).toBe(200);
 });

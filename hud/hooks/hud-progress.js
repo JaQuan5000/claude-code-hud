@@ -22,6 +22,19 @@
 export const MIN_PLAN = 2;
 
 /**
+ * The tool the mod registers itself, listed up front in every session.
+ *
+ * Claude Code's own task tools are not in every session (a 2.1.307 session
+ * on a server was found with none, and where they exist they sit behind
+ * ToolSearch, which a long job does not go and look in), so the bar had
+ * nothing to count. This one is always there, takes the whole list each time
+ * like TodoWrite does, and is the same honest denominator: the steps Claude
+ * itself says the job has, and which of them it says are done.
+ */
+export const HUD_TOOL_NAME = 'progress';
+export const HUD_TOOL = 'mcp__hud__progress';
+
+/**
  * The todo list out of a tool call, whatever the event happens to call it.
  *
  * Read across spellings on purpose. The field names on these events have
@@ -34,10 +47,36 @@ export function todosFrom(event) {
     const holders = [event, event.input, event.args, event.arguments, event.params, event.parameters];
     for (const holder of holders) {
         if (!holder || typeof holder !== 'object') continue;
-        const list = holder.todos || holder.todoList || holder.items || holder.tasks;
+        const list = holder.todos || holder.todoList || holder.steps || holder.items || holder.tasks;
         if (Array.isArray(list)) return list;
     }
     return [];
+}
+
+/**
+ * The steps out of a call to the hud tool, as the todo shape the bar reads.
+ *
+ * Only a step with words and a status it knows is a step: a list of blanks
+ * must draw no bar, not an empty one. The statuses are the tool's own
+ * (todo, doing, done) and, leniently, the names Claude Code's task tools use.
+ */
+export function stepsFrom(event) {
+    const out = [];
+    for (const step of todosFrom(event)) {
+        if (!step || typeof step !== 'object') continue;
+        // Words only: a step title is drawn in the terminal, so control
+        // characters (an escape sequence, a bell) are replaced by a space and
+        // the length is capped, whatever the model wrote.
+        const title = String(step.title || step.content || step.text || '')
+            .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 200);
+        const raw = String(step.status || step.state || '').toLowerCase().replace(/[\s-]/g, '_');
+        const status = ['done', 'completed', 'complete', 'finished'].includes(raw) ? 'completed'
+            : ['doing', 'in_progress', 'active', 'running'].includes(raw) ? 'in_progress'
+            : ['todo', 'pending', 'not_started'].includes(raw) ? 'pending' : '';
+        if (!title || !status) continue;
+        out.push({ content: title, activeForm: title, status });
+    }
+    return out;
 }
 
 /** The status of one item, normalised. */
@@ -242,9 +281,9 @@ export function todosFromTasks(tasks) {
  * `seen` is how many calls of each plan tool have gone past this session;
  * `tracking` is whether Claude is being asked to keep a task list.
  */
-export function planReport({ seen, tasks, plan, tracking, estimate }) {
+export function planReport({ seen, tasks, plan, tracking }) {
     const counts = seen || {};
-    const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList']
+    const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'progress']
         .reduce((n, k) => n + (counts[k] || 0), 0);
     const tracked = Array.isArray(tasks) ? tasks.length : 0;
 
@@ -255,24 +294,22 @@ export function planReport({ seen, tasks, plan, tracking, estimate }) {
         : 'plan: none');
     lines.push('tasks tracked from the task tools: ' + tracked);
     lines.push('plan tracking: ' + (tracking ? 'on, Claude is asked to keep a task list for long jobs' : 'off'));
-    lines.push('estimated plan: ' + (estimate && estimate.on
-        ? (estimate.steps ? 'on, ' + estimate.done + '/' + estimate.steps + ' steps worked out from the work' : 'on, none worked out yet')
-        : 'off'));
     lines.push('plan tool calls seen this session: TaskCreate ' + (counts.TaskCreate || 0)
         + ', TaskUpdate ' + (counts.TaskUpdate || 0)
         + ', TaskList ' + (counts.TaskList || 0)
         + ', TodoWrite ' + (counts.TodoWrite || 0)
+        + ', progress ' + (counts.progress || 0)
         + (counts.last ? ', last was ' + counts.last : ''));
     lines.push('');
 
     if (total === 0) {
         lines.push('No plan tool has been called in this session, so there is nothing to draw.');
-        lines.push('The bar counts a task list, and a job run without one - often one handed to');
-        lines.push('subagents a step at a time - has nothing to count.');
+        lines.push('The bar counts the steps Claude writes down, and a job run without any steps has nothing to count.');
+        lines.push('It never guesses a plan: no steps, no bar.');
         if (tracking) {
             lines.push('Plan tracking is on, so Claude is asked to keep one for any job of three or more');
             lines.push('steps, from its next request. A job already under way may need asking directly:');
-            lines.push('"keep a task list for the rest of this".');
+            lines.push('"keep a task list for the rest of this", or "report your steps with the progress tool".');
         } else {
             lines.push('Plan tracking is off. /hud track on asks Claude to keep one for long jobs.');
         }
@@ -299,7 +336,7 @@ export function planReport({ seen, tasks, plan, tracking, estimate }) {
 // =====================================================================
 
 /** The tools that build a plan. */
-const PLAN_TOOLS = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList'];
+const PLAN_TOOLS = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', HUD_TOOL];
 
 /**
  * A call's result as applyTaskTool reads it, from what the transcript kept.
@@ -330,7 +367,7 @@ export function replayPlan(messages) {
     let tasks = [];
     let todos = [];
     let source = '';
-    const counts = { TodoWrite: 0, TaskCreate: 0, TaskUpdate: 0, TaskList: 0, last: '' };
+    const counts = { TodoWrite: 0, TaskCreate: 0, TaskUpdate: 0, TaskList: 0, progress: 0, last: '' };
 
     for (const message of Array.isArray(messages) ? messages : []) {
         if (!message || message.role !== 'assistant' || !Array.isArray(message.toolUses)) continue;
@@ -339,8 +376,8 @@ export function replayPlan(messages) {
             if (!PLAN_TOOLS.includes(use.tool)) continue;
             const input = use.input && typeof use.input === 'object' ? use.input : {};
 
-            if (use.tool === 'TodoWrite') {
-                todos = todosFrom(input);
+            if (use.tool === 'TodoWrite' || use.tool === HUD_TOOL) {
+                todos = use.tool === HUD_TOOL ? stepsFrom(input) : todosFrom(input);
                 source = 'todos';
             } else {
                 const result = storedResult(use);
@@ -350,8 +387,9 @@ export function replayPlan(messages) {
                 tasks = applyTaskTool(tasks, use.tool, input, result || {});
                 source = 'tasks';
             }
-            counts[use.tool] += 1;
-            counts.last = use.tool;
+            const key = use.tool === HUD_TOOL ? 'progress' : use.tool;
+            counts[key] += 1;
+            counts.last = key;
         }
     }
     return { tasks, todos, source, counts };
@@ -389,7 +427,6 @@ export function trackingNudge(tools) {
     const hasTasks = offered.includes('TaskCreate') && offered.includes('TaskUpdate');
     const hasTodos = offered.includes('TodoWrite');
     const canLoad = offered.includes('ToolSearch');
-    if (!hasTasks && !hasTodos && !canLoad) return '';
 
     const lead = 'Progress tracking is required here. Before your first tool call on any request with three or more steps, '
         + 'or when you are carrying out a written plan, create the task list: ';
@@ -397,16 +434,25 @@ export function trackingNudge(tools) {
         + 'as each step\'s work is accepted. The person watches a progress bar that counts exactly these tasks, '
         + 'so work without them is invisible to them. Skip this for questions and single small edits.';
 
+    // Where there is no task tool to be had and nothing to look for one with, the mod's own is the one that is always there.
+    if (!hasTasks && !hasTodos && !canLoad) return lead + HUD_STEPS + tail;
+
     if (hasTasks || (canLoad && !hasTodos)) {
         const load = canLoad
             ? 'if TaskCreate and TaskUpdate are not loaded yet, load them with ToolSearch (query "select:TaskCreate,TaskUpdate"), then '
             : '';
         return lead + load + 'call TaskCreate once per step. Mark each task in_progress with TaskUpdate when you begin it '
-            + 'and completed as soon as it is done.' + tail;
+            + 'and completed as soon as it is done.' + (canLoad ? HUD_FALLBACK : ' ') + tail;
     }
     return lead + 'write the steps with TodoWrite, and write the list again as each step starts and finishes, '
         + 'with exactly one in_progress at a time.' + tail;
 }
+
+/** How to use the mod's own tool, said once. */
+const HUD_STEPS = 'call ' + HUD_TOOL + ' with every step of the job, each with a status of todo, doing or done, and call it again with the '
+    + 'whole list every time a step starts and every time one finishes, with exactly one step doing at a time.';
+/** Said beside the task tools, for the sessions where ToolSearch finds none. */
+const HUD_FALLBACK = ' If ToolSearch finds no such tools, ' + HUD_STEPS + ' ';
 
 // =====================================================================
 // Reminding a model that is already deep in a job
@@ -458,16 +504,16 @@ export function reminderText(tools) {
     const hasTasks = !offered || (offered.includes('TaskCreate') && offered.includes('TaskUpdate'));
     const hasTodos = !!offered && offered.includes('TodoWrite');
     const canLoad = !offered || offered.includes('ToolSearch');
-    if (offered && !hasTasks && !hasTodos && !canLoad) return '';
 
     const lead = 'No task list exists for the work you are in the middle of, so the progress bar the person is watching '
         + 'is empty. Break what remains into at least three separate tasks now, one per step or item and never one task for everything: ';
+    if (!hasTasks && !hasTodos && !canLoad) return lead + HUD_STEPS;
     if (hasTasks || (canLoad && !hasTodos)) {
         const load = canLoad
             ? 'if TaskCreate and TaskUpdate are not loaded yet, load them with ToolSearch (query "select:TaskCreate,TaskUpdate"), then '
             : '';
         return lead + load + 'call TaskCreate for each, mark the one you are on in_progress with TaskUpdate, and mark each '
-            + 'completed as it is done.';
+            + 'completed as it is done.' + (canLoad ? HUD_FALLBACK.trimEnd() : '');
     }
     return lead + 'write them with TodoWrite, with exactly one in_progress, and write the list again as each one finishes.';
 }

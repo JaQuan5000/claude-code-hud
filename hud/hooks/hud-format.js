@@ -366,6 +366,65 @@ export function layout(state, columns, opts = {}) {
 }
 
 /**
+ * The same bar for a plan being worked on, one frame of it.
+ *
+ * Solid blocks for finished steps, a medium shade for the step in hand, a light
+ * shade for the rest, all in the plan's blue: savvy-progress's bar with the
+ * work in hand shown. While Claude is working the bar is alive: a lighter
+ * band runs along the finished part, and the step in hand breathes between
+ * two shades. When Claude is idle both stop, so a bar standing still means
+ * nobody is working on it. `tick` is the frame number, any increasing
+ * integer; the caller derives it from the clock.
+ *
+ * Returns pieces as `{ text, color }`, runs of cells that look the same, so a
+ * frame costs a handful of pieces and not one per cell.
+ */
+export function planBarFrame(plan, { ascii = false, cells = 16, working = false, tick = 0 } = {}) {
+    const width = Math.max(1, Math.round(cells));
+    const total = (plan && plan.total) || 0;
+    const done = (plan && plan.done) || 0;
+    const doing = (plan && plan.doing) || 0;
+    const complete = !!(plan && plan.complete);
+
+    if (complete) return [{ text: (ascii ? '#' : '\u2588').repeat(width), color: PLAN_DONE }];
+
+    let filled = total ? Math.round(width * (done / total)) : 0;
+    if (done > 0 && filled === 0) filled = 1;
+    if (filled >= width && width > 1) filled = width - 1;
+
+    // The step in hand: at least a cell, never past the end, and never so wide it hides how much is not started.
+    let hand = 0;
+    if (doing > 0 && total) {
+        hand = Math.max(1, Math.round(width * (doing / total)));
+        hand = Math.min(hand, width - filled);
+    }
+
+    const FULL = ascii ? '#' : '\u2588';
+    const SHADE_A = ascii ? '=' : '\u2593';
+    const SHADE_B = ascii ? '+' : '\u2592';
+    const REST = ascii ? '-' : '\u2591';
+
+    // A band three cells wide running left to right along the finished part, with a gap before it comes round again.
+    const span = filled + 6;
+    const band = working && filled > 0 && !ascii ? (Math.floor(tick) % span) - 3 : -99;
+    // The step in hand breathes about once a second at five frames a second.
+    const breathe = working && Math.floor(tick / 3) % 2 === 0;
+
+    const out = [];
+    const push = (text, color) => {
+        const last = out[out.length - 1];
+        if (last && last.color === color) last.text += text;
+        else out.push({ text, color });
+    };
+    for (let i = 0; i < width; i += 1) {
+        if (i < filled) push(FULL, i >= band && i < band + 3 ? PLAN_GLOW : PLAN_ACCENT);
+        else if (i < filled + hand) push(breathe ? SHADE_A : SHADE_B, PLAN_ACCENT);
+        else push(REST, PLAN_ACCENT);
+    }
+    return out;
+}
+
+/**
  * The plan's bar in characters, for the terminal, the way savvy-progress
  * draws it: solid blocks for what is finished and a light shade for what is
  * left, the whole bar in the plan's colour, no brackets. A soft violet while
@@ -393,8 +452,22 @@ export function planBar(plan, ascii = false, cells = 16) {
     return pieces;
 }
 
-/** The plan's colours, as savvy-progress has them. Kept here so the terminal needs nothing from the svg file. */
-export const PLAN_ACCENT = '#8f8cf4';
+/**
+ * The plan's colours. Kept here so the terminal needs nothing from the svg file.
+ *
+ * savvy-progress's periwinkle is #8f8cf4, and that is what the desktop draws.
+ * The terminal's is a touch deeper, #7a7cf8, for a reason that has nothing to
+ * do with taste: a terminal that reports only sixteen colours (tmux 3.2 to 3.4
+ * with its default TERM=screen, which is what a Claude Code on a server sees
+ * through tmux) has every hex colour rounded to the nearest of sixteen, and
+ * rounding #8f8cf4 lands on bright WHITE: the badge and the whole bar came out
+ * cream. Rounding goes by which of red, green and blue are past half, and
+ * #7a7cf8 has only blue past half, so it lands on bright blue there and is
+ * still a periwinkle everywhere else.
+ */
+export const PLAN_ACCENT = '#7a7cf8';
+/** The lighter blue that runs along a bar while Claude is working. */
+export const PLAN_GLOW = '#bcc0ff';
 export const PLAN_DONE = '#5fbf8f';
 
 // ===================================================================== header
@@ -414,7 +487,7 @@ export const BAND_FG = '#d9d7cd';
 export const BAND_DIM = '#8d8a80';
 export const BAND_CYAN = '#6fb6c4';
 export const BAND_AMBER = '#dba54b';
-export const BADGE_BG = '#8f8cf4';
+export const BADGE_BG = '#7a7cf8';
 export const BADGE_FG = '#14131f';
 
 /** Below this the reset time on the right gives way, so the left side keeps its room. */
