@@ -159,7 +159,7 @@ Three features make their own model requests, and all are **on by default**. Eve
 |---|---|---|---|
 | Follow-up suggestions | After a turn that produced an answer | A trimmed slice of your prompt and the answer | `/hud suggest off` |
 | Heads-up | At most every few turns, and only after a substantial turn | The last ~2,400 characters of the conversation | `/hud know off` |
-| Estimated plan | During a long job with no task list, at most once a minute | Your latest request, the descriptions of subagents sent, the **names** of files touched, and Claude's last reply, trimmed. Never a command, never a directory | `/hud estimate off` |
+| Estimated plan | During a job with no task list, at most twice a minute, and once when the turn ends | Your latest request, the descriptions of subagents sent, the **names** of files touched, and Claude's last reply, trimmed. Never a command, never a directory | `/hud estimate off` |
 
 All three go to your own model on your own account - the same conversation, to the same place it already goes - and all are capped. Nothing about your conversation is stored, nothing reaches a third party, and no telemetry of any kind leaves your machine. With `suggest`, `know` and `estimate` all off, the mod makes no requests at all.
 
@@ -209,7 +209,7 @@ Plan tracking is a prompt-level feature, so it does not run where an organizatio
 
 Asking Claude to keep a task list works for a fresh session and not reliably for a long one. A model with hours of task-less history carries on as it has been, and was seen ignoring both the note in the system prompt and the reminder beside a tool result. A bar that appears only when the model cooperates is mostly not there, so the mod can work the plan out from the work.
 
-After about twelve tool calls with no task list, and again when a substantial turn ends, never more than once a minute, the cheap model is shown what is visible from outside: your latest request, the subagents sent (their descriptions say what each was for), the names of the files edited, and Claude's last reply. It answers with the steps of the whole job and which are done, or `NONE` when this is a question or a small change. The bar then draws it with a tilde before the count (`Tasks ~4/9`), and the sidebar says it is an estimate.
+After about five tool calls with no task list, then every half minute or so while the job runs, and once more the moment the turn ends, the cheap model is shown what is visible from outside: your latest request, the subagents sent (their descriptions say what each was for), the names of the files edited, and Claude's last reply. It answers with the steps of the whole job and which are done, or `NONE` when this is a question or a small change. The bar then draws it with a tilde before the count (`Tasks ~4/9`), and the sidebar says it is an estimate.
 
 What is sent is narrow on purpose. A command is never included, since a command can carry a token or a password. A file is named by its last path segment only. A step that was done stays done, so the bar does not go backwards, and a list that shares almost nothing with the last one is taken as a new job. A task list Claude writes itself always wins, and the estimate gives way to it at once. `/hud estimate off` removes it and the requests with it.
 

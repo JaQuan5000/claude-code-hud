@@ -32,8 +32,8 @@ const MAX_LINES = 28;
 const MAX_STEP = 70;
 
 /** When to look, so a job costs a handful of small requests and not one per step. */
-export const INFER_EVERY_CALLS = 12;
-export const INFER_MIN_GAP_MS = 60000;
+export const INFER_EVERY_CALLS = 5;
+export const INFER_MIN_GAP_MS = 30000;
 export const INFER_TURN_TOOL_CALLS = 3;
 
 /** One line, no control characters, no longer than asked. */
@@ -266,9 +266,10 @@ export function toTodos(plan) {
  * Is it time to ask again?
  *
  * Only with no plan of Claude's own, only after a stretch of work, and never
- * more than once a minute, so a long job costs a handful of small requests.
+ * more than twice a minute, so a long job costs a handful of small requests.
  * `turnEnded` is the other moment worth looking: a finished turn that did real
- * work.
+ * work. The caller passes `lastAt: 0` there, because the end of a turn is not
+ * held back by the gap: see `inferPlan`'s `final`.
  */
 export function inferDue({ on, planned, busy, calls, turnToolCalls, turnEnded, lastAt, now }) {
     if (!on || planned || busy) return false;

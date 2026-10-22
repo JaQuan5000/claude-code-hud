@@ -33,7 +33,7 @@ import { todosFrom, progressOf, countText, worthShowing, applyTaskTool, todosFro
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
 import { projectionText } from './hud-pace.js';
-import { buildPlanPrompt, parsePlan, stabilise, toTodos, inferDue, isNone } from './hud-infer.js';
+import { buildPlanPrompt, parsePlan, stabilise, toTodos, inferDue, isNone, INFER_TURN_TOOL_CALLS } from './hud-infer.js';
 
 /**
  * What the strip draws from.
@@ -133,7 +133,7 @@ const state = {
     estPlan: null,
     estItems: [],
     inferOn: true,
-    infer: { calls: 0, turnCalls: 0, lastAt: 0, busy: false },
+    infer: { calls: 0, turnCalls: 0, lastAt: 0, busy: false, settle: false },
     /** What the guard has looked at: how many commands, and the ones it stopped on. */
     guardSeen: 0,
     guards: [],
@@ -749,27 +749,35 @@ function shownPlan() {
  * start it: a tool call must not wait on a model. It never throws, and leaves
  * what is on screen alone when the answer cannot be read.
  */
-async function inferPlan($) {
+async function inferPlan($, final = false) {
     if (state.infer.busy) return;
     state.infer.busy = true;
     state.infer.lastAt = Date.now();
     state.infer.calls = 0;
+    // `final` is the look at the end of a turn. The job has stopped, so a bar
+    // frozen at the last number it had would claim progress nobody is making:
+    // if this look cannot say how it ended, the estimate is dropped rather
+    // than left standing.
+    const drop = () => {
+        state.est = null;
+        state.estPlan = null;
+        state.estItems = [];
+        $.ui.invalidate('ui.render');
+    };
     try {
         const ask = buildPlanPrompt(await $.session.messages(), state.est);
-        if (!ask) return;
+        if (!ask) { if (final) drop(); return; }
         const reply = await $.model.complete({ model: opts.fastModel, prompt: ask, maxTokens: 500 });
         const raw = reply && reply.isAnswered === false ? '' : reply;
         // The model says there is no job: whatever was estimated is over.
         if (isNone(raw)) {
-            state.est = null;
-            state.estPlan = null;
-            state.estItems = [];
-            $.ui.invalidate('ui.render');
+            drop();
             return;
         }
         const parsed = parsePlan(raw);
-        // Unreadable is not the same as none: the last good estimate stays.
-        if (!parsed) return;
+        // Unreadable is not the same as none: the last good estimate stays,
+        // unless the turn has ended and there is no work left to be counting.
+        if (!parsed) { if (final) drop(); return; }
         const merged = stabilise(state.est, parsed);
         const items = toTodos(merged);
         const plan = progressOf(items);
@@ -779,8 +787,15 @@ async function inferPlan($) {
         $.ui.invalidate('ui.render');
     } catch {
         // An estimate is a convenience, and a failed request is not worth a word.
+        if (final) drop();
     } finally {
         state.infer.busy = false;
+        // The turn ended while a look was still out: look once more, now that
+        // it has, so the bar does not keep what that look saw mid-job.
+        if (state.infer.settle) {
+            state.infer.settle = false;
+            void inferPlan($, true);
+        }
     }
 }
 
@@ -1064,12 +1079,19 @@ export function register(on) {
         }
         const worked = state.infer.turnCalls;
         state.infer.turnCalls = 0;
-        if (inferDue({
-            on: state.inferOn, planned: worthShowing(state.plan), busy: state.infer.busy,
+        // The end of a turn is when an estimate is most likely to be wrong: the
+        // job it counted has stopped. It is looked at again at once, with no
+        // wait for the gap that spaces out the looks during a job, and a bar
+        // that cannot be brought up to date is taken down.
+        const settle = !worthShowing(state.plan);
+        if (settle && state.infer.busy) {
+            if (state.estPlan || worked >= INFER_TURN_TOOL_CALLS) state.infer.settle = true;
+        } else if (settle && (state.estPlan || inferDue({
+            on: state.inferOn, planned: false, busy: false,
             calls: 0, turnToolCalls: worked, turnEnded: true,
-            lastAt: state.infer.lastAt, now: Date.now(),
-        })) {
-            void inferPlan($);
+            lastAt: 0, now: Date.now(),
+        }))) {
+            void inferPlan($, true);
         }
 
         state.headsSinceLast += 1;

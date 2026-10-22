@@ -11,6 +11,8 @@
 import { expect, test } from 'claude-code/testing';
 
 import { classify, chooseModel, LONG_PROMPT, BRIEF_PROMPT } from '../hooks/hud-route.js';
+// The hooks module itself. A static import: the test runner refuses import(), as the engine does.
+import { register } from '../hooks/register.js';
 import { MODELS, shortModel, resolveModel, NEWEST } from '../hooks/hud-models.js';
 import { paceOf, paceText, paceMark, projectionText, FAST_RATIO } from '../hooks/hud-pace.js';
 import { record, logLines, tuneLines, signalsIn, snippet, commonWords, KEEP } from '../hooks/hud-log.js';
@@ -1141,7 +1143,7 @@ test('the hooks module loads and registers its hooks', async () => {
         return { catch: () => undefined };
     };
 
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     expect(typeof mod.register).toBe('function');
     mod.register(on);
 
@@ -1164,7 +1166,7 @@ test('no event is registered twice without a matcher', async () => {
         return { catch: () => undefined };
     };
 
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
 
     const seen = new Set();
@@ -1189,7 +1191,7 @@ test('the gating hook has a catch handler, so a bug in it fails open', async () 
         };
     };
 
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
     expect(gatedHasCatch).toBe(true);
 });
@@ -1578,7 +1580,7 @@ async function renderDesktopStrip(rateLimits, contextPercent) {
         hooks.push({ event, matcher, handler });
         return { catch: () => undefined };
     };
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
 
     const el = (type) => (props) => ({ type, ...props });
@@ -1676,7 +1678,7 @@ async function promptsAt(percent, answers, count, beforePrompts) {
         hooks.push({ event, handler: typeof a === 'function' ? a : b });
         return { catch: () => undefined };
     };
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
 
     const asked = [];
@@ -1755,7 +1757,7 @@ async function hudWith(store) {
         hooks.push({ event, handler: typeof a === 'function' ? a : b });
         return { catch: () => undefined };
     };
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
     const ctx = {
         store,
@@ -1974,7 +1976,7 @@ async function runTaskCalls(calls) {
         hooks.push({ event, matcher, handler: typeof a === 'function' ? a : b });
         return { catch: () => undefined };
     };
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
 
     const el = (type) => (props) => ({ type, ...props });
@@ -2252,7 +2254,7 @@ async function sidebarSession(opts) {
         hooks.push({ event, matcher: typeof a === 'function' ? null : a, handler: typeof a === 'function' ? a : b });
         return { catch: () => undefined };
     };
-    const mod = await import('../hooks/register.js');
+    const mod = { register };
     mod.register(on);
 
     const calls = { open: [], close: [] };
@@ -4043,6 +4045,14 @@ const callsOf = async (h, n) => {
     await sleep2(30);
 };
 const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
+// Run fn as if two minutes had gone by, so the once-a-minute limit has
+// passed. Date.now itself cannot be reassigned under the test runner, so the
+// whole Date is swapped for one that reads two minutes ahead, and put back.
+const RealDate = Date;
+async function twoMinutesLater(fn) {
+    globalThis.Date = class extends RealDate { static now() { return RealDate.now() + 120000; } };
+    try { await fn(); } finally { globalThis.Date = RealDate; }
+}
 
 test('after a stretch of work with no plan the bar appears, marked as an estimate', async () => {
     const h = await estimateSession(PLAN_ANSWER);
@@ -4080,9 +4090,7 @@ test('a model that says there is no job clears the estimate', async () => {
     expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
     // A minute later, with the work over, it says so.
     h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'NONE' }) };
-    const realNow = Date.now;
-    Date.now = () => realNow() + 120000;
-    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
     expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
 });
 
@@ -4090,9 +4098,7 @@ test('an answer that cannot be read leaves the last good estimate alone', async 
     const h = await estimateSession(PLAN_ANSWER);
     await callsOf(h, INFER_EVERY_CALLS);
     h.ctx.model = { complete: async () => ({ isAnswered: true, text: 'I am not sure what you mean' }) };
-    const realNow = Date.now;
-    Date.now = () => realNow() + 120000;
-    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
     expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
 });
 
@@ -4102,9 +4108,7 @@ test('a failed or refused request costs nothing and shows nothing', async () => 
     await callsOf(h, INFER_EVERY_CALLS);
     expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
     h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'api-error' }) };
-    const realNow = Date.now;
-    Date.now = () => realNow() + 120000;
-    try { await callsOf(h, INFER_EVERY_CALLS); } finally { Date.now = realNow; }
+    await twoMinutesLater(() => callsOf(h, INFER_EVERY_CALLS));
     expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
 });
 
@@ -4169,4 +4173,119 @@ test('the estimate is a switch like the others, and is kept for next time', asyn
     expect(saved.prefs.inferOn).toBe(false);
     await h.say('estimate on');
     expect(saved.prefs.inferOn).toBe(true);
+});
+
+// ---- the end of a job
+
+// Only the requests that work out a plan: a finished turn also asks for follow-ups.
+const looks = (h) => h.asked.filter((r) => String(r.prompt).includes('keep a progress bar honest')).length;
+
+const endTurn = async (h, answer = 'Done.') => {
+    await hookOf(h, 'turn.complete').handler(h.ctx, { answer, isAborted: false, durationMs: 1000 }, async () => ({ text: answer }));
+    await sleep2(40);
+};
+
+test('the bar shows from the fifth call of a job, not the twelfth', async () => {
+    expect(INFER_EVERY_CALLS <= 5).toBe(true);
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+});
+
+test('when the turn ends the estimate is brought up to date at once, inside the gap between looks', async () => {
+    // The bug seen live: a 16-call job finished 18 seconds after the last look,
+    // the once-a-minute limit held the end-of-turn look back, and the bar sat at
+    // 40% under the finished answer.
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+    const asked = looks(h);
+    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: JSON.stringify({ title: 'Accounts', steps: [
+        { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'done' }, { t: 'Task 3 tests', s: 'done' }, { t: 'Task 4 deploy', s: 'done' },
+    ] }) }; } };
+    await endTurn(h);
+    expect(looks(h)).toBe(asked + 1);
+    // Everything done is a receipt: the bar goes.
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+});
+
+test('an estimate that cannot be brought up to date at the end of a turn is taken down, not left frozen', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(true);
+    h.ctx.model = { complete: async () => { throw new Error('offline'); } };
+    await endTurn(h);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
+    // An answer that cannot be read is the same.
+    const g = await estimateSession(PLAN_ANSWER);
+    await callsOf(g, INFER_EVERY_CALLS);
+    g.ctx.model = { complete: async () => ({ isAnswered: true, text: 'no idea' }) };
+    await endTurn(g);
+    expect(hasKey(await g.band('terminal'), 'hud-progress')).toBe(false);
+});
+
+test('a job that is not finished keeps its bar across the end of a turn', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, INFER_EVERY_CALLS);
+    await endTurn(h, 'Which of the two do you want?');
+    const row = find(await h.band('terminal'), 'hud-progress');
+    expect(!!row).toBe(true);
+    expect(textsOf(row).includes('Tasks ~1/4')).toBe(true);
+});
+
+test('a turn that did little and left no estimate asks nothing', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await callsOf(h, 1);
+    const asked = looks(h);
+    await endTurn(h);
+    expect(looks(h)).toBe(asked);
+});
+
+test('with the estimate off the end of a turn asks nothing', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    await h.say('estimate off');
+    const asked = looks(h);
+    await callsOf(h, INFER_EVERY_CALLS);
+    await endTurn(h);
+    expect(looks(h)).toBe(asked);
+});
+
+test('a job of a few calls that ends inside the gap still gets its look', async () => {
+    // Five calls took a look that found nothing; three more and the turn ends
+    // seconds later. The end of the turn is not held back by the gap.
+    const h = await estimateSession('NONE');
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(looks(h)).toBe(1);
+    h.ctx.model = { complete: async (req) => { h.asked.push(req); return { isAnswered: true, text: PLAN_ANSWER }; } };
+    await callsOf(h, 3);
+    expect(looks(h)).toBe(1);
+    await endTurn(h);
+    expect(looks(h)).toBe(2);
+});
+
+test('a turn that ends while a look is still out gets a second look afterwards', async () => {
+    const h = await estimateSession(PLAN_ANSWER);
+    const DONE = JSON.stringify({ title: 'Accounts', steps: [
+        { t: 'Task 1 schema', s: 'done' }, { t: 'Task 2 routes', s: 'done' }, { t: 'Task 3 tests', s: 'done' }, { t: 'Task 4 deploy', s: 'done' },
+    ] });
+    let release = () => undefined;
+    let answerNow = false;
+    h.ctx.model = { complete: (req) => {
+        h.asked.push(req);
+        // Follow-up suggestions and the like are not what is being held.
+        if (!String(req.prompt).includes('keep a progress bar honest')) return Promise.resolve({ isAnswered: false, reason: 'skipped' });
+        if (answerNow) return Promise.resolve({ isAnswered: true, text: DONE });
+        return new Promise((resolve) => { release = () => resolve({ isAnswered: true, text: PLAN_ANSWER }); });
+    } };
+    await callsOf(h, INFER_EVERY_CALLS);
+    expect(looks(h)).toBe(1);
+    // The turn ends while that look has not come back.
+    await endTurn(h);
+    expect(looks(h)).toBe(1);
+    // It comes back showing the job half done; the look at the end of the turn now goes out and finds it finished.
+    answerNow = true;
+    release();
+    await sleep2(120);
+    expect(looks(h)).toBe(2);
+    expect(hasKey(await h.band('terminal'), 'hud-progress')).toBe(false);
 });
