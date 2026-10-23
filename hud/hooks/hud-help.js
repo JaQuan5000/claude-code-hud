@@ -44,6 +44,8 @@ const PAGES = {
             '  ● Wiring the panel   █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%',
             '',
             'Solid blocks are finished steps, the medium shade is the step in hand, the light shade is what is left.',
+            'Under it: the last step finished, the next two, and how many more. A narrow pane lists only the next one.',
+            'Every terminal row of the HUD has a thin violet bar down its left edge, so you can tell it from the reply.',
             'While Claude works it moves. The moment its turn ends, or you interrupt it, the bar goes.',
             '',
             'Where the numbers come from: the list Claude writes down before it starts and ticks as it goes.',

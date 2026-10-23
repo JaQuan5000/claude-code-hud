@@ -22,7 +22,7 @@ import { levelOf, resetFormFor, clockText, readingsFor, worstLevel, needsClock, 
     CALM, WATCH, URGENT, COUNTDOWN_WITHIN_MS } from '../hooks/hud-focus.js';
 import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool, todosFromTasks, planReport,
     replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText, HUD_TOOL, HUD_TOOL_NAME, stepsFrom,
-    REMIND_AFTER, REMIND_EVERY, REMIND_MAX } from '../hooks/hud-progress.js';
+    REMIND_AFTER, REMIND_EVERY, REMIND_MAX, planListRows, LIST_MIN_ROWS } from '../hooks/hud-progress.js';
 import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
 import { planBar, planBarFrame, PLAN_ACCENT, PLAN_GLOW, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
 import { planSvg } from '../hooks/hud-svg.js';
@@ -3643,7 +3643,9 @@ test('on the terminal the header is the first row of the HUD, on its own band', 
     expect(head.backgroundColor).toBe(BAND_BG);
     expect(head.justifyContent).toBe('space-between');
     // First, so a long reply above cannot be read as running into the strip.
-    const rows = tree.type === 'Box' && tree.key === 'hud-head' ? [tree] : tree.children;
+    // The rows sit in the rail, after the drawn bar that runs down its left.
+    const rows = tree.type === 'Box' && tree.key === 'hud-head' ? [tree]
+        : tree.children.filter((c) => c && c.key !== 'hud-rail-bar');
     expect(rows[0].key).toBe('hud-head');
     expect(textsOf(head).includes('HUD')).toBe(true);
 });
@@ -4300,4 +4302,163 @@ test('every wording of the request asks Claude to make the list true before it s
     // And the hud tool's own description, which is all Claude sees of it.
     const h = await barSession();
     expect(h.registered.some((t) => String(t.description).includes('one last time before you stop'))).toBe(true);
+});
+
+
+// ---- 0.15.0: the rail down the left, the full-width step, the steps around it
+
+/** The band as the terminal asks for it, at a given window size. */
+const bandAt = (h, columns, rows) => hookOf(h, 'ui.render', (m) => m && m.component === 'AbovePrompt')
+    .handler(h.ctx, { surface: 'terminal', component: 'AbovePrompt', viewport: { columns, rows } }, async () => null);
+
+const eightSteps = [
+    { title: 'Explore the analytics codebase and its event collector', status: 'done' },
+    { title: 'Map every tracking call the app makes today', status: 'done' },
+    { title: 'Asking clarifying questions about the event schema, consent and retention rules', status: 'doing' },
+    { title: 'Propose two or three integration approaches with their trade-offs', status: 'todo' },
+    { title: 'Present the design section by section for your approval', status: 'todo' },
+    { title: 'Write the design doc', status: 'todo' },
+    { title: 'Self-review the spec', status: 'todo' },
+    { title: 'Write the implementation plan', status: 'todo' },
+];
+const asItems = (steps) => stepsFrom({ steps });
+const rowText = (pieces) => pieces.map((p) => p.text).join('');
+
+test('the steps around the one in hand: the last finished, the next two, and a count of the rest', async () => {
+    const rows = planListRows(asItems(eightSteps), { columns: 160, rows: 45 });
+    expect(rows.length).toBe(4);
+    expect(rowText(rows[0])).toBe('  ✓ Map every tracking call the app makes today');
+    expect(rowText(rows[1]).includes('next  Propose two or three integration approaches')).toBe(true);
+    expect(rowText(rows[2]).includes('then  Present the design section by section')).toBe(true);
+    expect(rowText(rows[3])).toBe('    + 3 more after that');
+    expect(rows[0][0].role).toBe('done');
+});
+
+test('a narrow pane keeps only the next step, and a short window keeps none', async () => {
+    const narrow = planListRows(asItems(eightSteps), { columns: 88, rows: 45 });
+    expect(narrow.length).toBe(2);
+    expect(rowText(narrow[0]).includes('next  Propose')).toBe(true);
+    expect(rowText(narrow[1])).toBe('    + 4 more after that');
+    expect(planListRows(asItems(eightSteps), { columns: 160, rows: LIST_MIN_ROWS - 1 }).length).toBe(0);
+    // A window that does not say how tall it is still gets the list.
+    expect(planListRows(asItems(eightSteps), { columns: 160 }).length).toBe(4);
+});
+
+test('a title too long for the row is cut with an ellipsis, never wrapped', async () => {
+    const long = eightSteps.map((s, i) => (i === 3 ? { ...s, title: 'x'.repeat(300) } : s));
+    for (const columns of [40, 88, 160]) {
+        for (const pieces of planListRows(asItems(long), { columns, rows: 45 })) {
+            expect([...rowText(pieces)].length <= columns).toBe(true);
+        }
+    }
+    const row = planListRows(asItems(long), { columns: 88, rows: 45 })[0];
+    expect(rowText(row).endsWith('…')).toBe(true);
+});
+
+test('no list when there is nothing left to do, no plan, or nothing to show', async () => {
+    expect(planListRows(asItems(eightSteps.map((s) => ({ ...s, status: 'done' }))), { columns: 160 }).length).toBe(0);
+    expect(planListRows(asItems([eightSteps[0]]), { columns: 160 }).length).toBe(0);
+    expect(planListRows(null, { columns: 160 }).length).toBe(0);
+    // Two steps, the second in hand: nothing ahead, the last done is still worth a row.
+    const two = planListRows(asItems([eightSteps[0], eightSteps[2]]), { columns: 160 });
+    expect(two.length).toBe(1);
+    expect(rowText(two[0]).includes('Explore the analytics codebase')).toBe(true);
+});
+
+test('with nothing marked in hand, every open step is ahead and none is singled out', async () => {
+    const none = eightSteps.map((s) => (s.status === 'doing' ? { ...s, status: 'todo' } : s));
+    const rows = planListRows(asItems(none), { columns: 160 });
+    expect(rowText(rows[1]).includes('next  Asking clarifying questions')).toBe(true);
+    expect(rowText(rows[rows.length - 1])).toBe('    + 4 more after that');
+});
+
+test('the list draws in plain characters for a terminal that is not in UTF-8', async () => {
+    const rows = planListRows(asItems(eightSteps), { columns: 160, ascii: true });
+    expect(rowText(rows[0]).startsWith('  v ')).toBe(true);
+    expect(rowText(rows[1]).startsWith('  o ')).toBe(true);
+});
+
+test('every terminal row of the HUD sits inside the rail, the header included', async () => {
+    const h = await barSession();
+    await write(h, eightSteps);
+    const tree = await bandAt(h, 160, 45);
+    const rail = find(tree, 'hud-rail');
+    expect(!!rail).toBe(true);
+    const bar = find(rail, 'hud-rail-bar');
+    expect(bar.position).toBe('absolute');
+    expect(bar.top).toBe(0);
+    expect(bar.bottom).toBe(0);
+    expect(bar.overflow).toBe('hidden');
+    expect(textsOf(bar).startsWith('▎\n▎')).toBe(true);
+    // The header, the bar, the steps and the strip are all children of the rail.
+    const keys = rail.children.map((c) => c && c.key);
+    expect(keys.includes('hud-head')).toBe(true);
+    expect(keys.includes('hud-progress')).toBe(true);
+    expect(keys.includes('hud-list-0')).toBe(true);
+    // The rows leave the rail and its gap free.
+    expect(rail.paddingLeft).toBe(2);
+});
+
+test('the step in hand takes the width the bar does not need, so a long one is shown in full', async () => {
+    const h = await barSession();
+    await write(h, eightSteps);
+    const row = find(await bandAt(h, 160, 45), 'hud-progress');
+    const head = find(row, 'pg-head');
+    expect(head.width > 81).toBe(true);
+    const bar = textsOf(find(row, 'pg-bar'));
+    expect([...bar.replace(/ \| /g, '')].length).toBe(40);
+    // Narrow: the bar shrinks and the name still gets what is left.
+    const small = find(await bandAt(h, 88, 45), 'hud-progress');
+    const smallBar = [...textsOf(find(small, 'pg-bar')).replace(/ \| /g, '')].length;
+    expect(smallBar).toBe(20);
+    const pct = textsOf(find(small, 'pg-p'));
+    expect(find(small, 'pg-head').width).toBe(88 - 2 - 20 - 'Tasks 2/8'.length - pct.length - 6);
+});
+
+test('the list shows under the bar while Claude works, and goes with it', async () => {
+    const h = await barSession();
+    await write(h, eightSteps);
+    expect(hasKey(await bandAt(h, 160, 45), 'hud-list-3')).toBe(true);
+    expect(hasKey(await bandAt(h, 160, 20), 'hud-list-0')).toBe(false);
+    await idle(h);
+    const after = await bandAt(h, 160, 45);
+    expect(hasKey(after, 'hud-list-0')).toBe(false);
+    expect(hasKey(after, 'hud-rail')).toBe(true);
+});
+
+test('the desktop draws no rail: it has a sidebar and gauges of its own', async () => {
+    const h = await barSession();
+    await write(h, eightSteps);
+    const tree = await h.band('desktop');
+    expect(hasKey(tree, 'hud-rail')).toBe(false);
+    expect(hasKey(tree, 'hud-list-0')).toBe(false);
+});
+
+/**
+ * The props a band's Box may carry, from the engine's own BoxProps. A tree
+ * with any other is refused whole and the HUD vanishes: 0.15.0's first draft
+ * did exactly that with borderTop, and passed every test here.
+ */
+const BOX_PROPS = new Set(['type', 'children', 'key', 'hover', 'position', 'top', 'left', 'right', 'bottom',
+    'flexDirection', 'flexGrow', 'flexShrink', 'flexWrap', 'alignItems', 'alignSelf', 'justifyContent',
+    'gap', 'columnGap', 'rowGap', 'width', 'height', 'minWidth', 'minHeight',
+    'margin', 'marginX', 'marginY', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight',
+    'padding', 'paddingX', 'paddingY', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
+    'borderStyle', 'borderColor', 'borderDimColor', 'backgroundColor', 'overflow', 'display']);
+
+test('every Box the band draws uses only props the engine accepts', async () => {
+    const h = await barSession();
+    await write(h, eightSteps);
+    h.ctx.prompt = { submit: () => undefined };
+    const trees = [await bandAt(h, 160, 45), await bandAt(h, 60, 20), await h.band('desktop')];
+    await idle(h);
+    trees.push(await bandAt(h, 160, 45));
+    for (const tree of trees) {
+        walk(tree, (n) => {
+            if (n.type !== 'Box') return;
+            for (const k of Object.keys(n)) {
+                if (!BOX_PROPS.has(k)) throw new Error('Box ' + (n.key || '?') + ' has a prop the band refuses: ' + k);
+            }
+        });
+    }
 });

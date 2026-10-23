@@ -15,7 +15,7 @@
  */
 
 import { layout, barPieces, tone, percentText, badgeText, shortKind, resetText, planBar, planBarFrame,
-    headerBar, BAND_BG, BAND_FG, BAND_DIM as BAND_DIM_COLOR } from './hud-format.js';
+    headerBar, BAND_BG, BAND_FG, BAND_DIM as BAND_DIM_COLOR, PLAN_ACCENT as TERMINAL_ACCENT } from './hud-format.js';
 import { gaugeSvg, gaugeAlt, planSvg, progressAlt, PLAN_ACCENT, PLAN_DONE } from './hud-svg.js';
 import { MODELS, shortModel, resolveModel } from './hud-models.js';
 import { classify, chooseModel } from './hud-route.js';
@@ -28,12 +28,26 @@ import { assess, previewFor, countLines, describe, warningFor, recordGuard, RAN,
 import { shouldCheck, buildHeadsPrompt, parseHeadsUp } from './hud-heads.js';
 import { readingsFor, worstLevel, needsClock, leadNote, clockText,
     CALM, WATCH, URGENT } from './hud-focus.js';
-import { todosFrom, stepsFrom, progressOf, countText, worthShowing, applyTaskTool, todosFromTasks, planReport,
+import { todosFrom, stepsFrom, progressOf, planListRows, countText, worthShowing, applyTaskTool, todosFromTasks, planReport,
     replayPlan, trackingNudge, TRACK_SECTION, reminderStep, reminderText, HUD_TOOL, HUD_TOOL_NAME } from './hud-progress.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
 import { projectionText } from './hud-pace.js';
 import { helpLines } from './hud-help.js';
+
+/** The colour down the left of every terminal row of the HUD: the badge's own, so the two read as one. */
+const RAIL_COLOR = TERMINAL_ACCENT;
+/** What the bar costs a row, in columns. */
+const RAIL_COLS = 1;
+/** And the space between it and the row, so the row does not run into it. */
+const RAIL_GAP = 1;
+/** More lines of bar than the HUD can ever be tall; what is past its bottom is clipped. */
+const RAIL_LINES = 40;
+
+/** The edge itself: a thin bar per line, or a plain one for a terminal not in UTF-8. */
+function railText(ascii) {
+    return Array(RAIL_LINES).fill(ascii ? '|' : '\u258e').join('\n');
+}
 
 /**
  * What the strip draws from.
@@ -1358,6 +1372,10 @@ export function register(on) {
             await openSidebar($);
         }
         const sidebar = e.surface === 'desktop' && (await sidebarShown($));
+        // The terminal's rows each carry the HUD's colour down their left edge,
+        // so what is the HUD is plain at a glance. The edge costs a column.
+        const railOn = !sidebar && !(e.surface === 'desktop' && typeof Svg === 'function');
+        const railCols = railOn ? RAIL_COLS + RAIL_GAP : 0;
 
         // Worked out once and used by both surfaces, so the terminal and the
         // desktop can never disagree about what matters.
@@ -1496,9 +1514,9 @@ export function register(on) {
             // measured its window it may report nothing at all, and a strip
             // drawn at full width is then clipped by whatever is narrower -
             // which is how the reset times disappeared off the right.
-            const columns = (e.props && e.props.bodyColumns)
+            const columns = ((e.props && e.props.bodyColumns)
                 || (e.viewport && e.viewport.columns)
-                || 80;
+                || 80) - railCols;
             // The header bar says the model, so the strip does not. Both are
             // drawn here for the terminal alone: the desktop has its own.
             const pieces = layout({ ...state, model }, columns, { ...opts, withModel: false });
@@ -1555,14 +1573,16 @@ export function register(on) {
             // hand, the bar, "Tasks 4/12", the percentage. The colours are
             // its own too: a soft violet while the work is under way, green
             // once it is finished.
-            const color = plan.complete ? PLAN_DONE : PLAN_ACCENT;
+            // The terminal's own violet, not the desktop's: a sixteen-colour
+            // terminal rounds the desktop's to white (see PLAN_ACCENT in hud-format.js).
+            const color = plan.complete ? PLAN_DONE : (railOn ? TERMINAL_ACCENT : PLAN_ACCENT);
             const name = plan.label || 'Plan';
             // A tilde where the count is a worked-out guess and not a task list.
             const count = 'Tasks ' + countText(plan);
             const pct = percentText(plan.percent);
-            const columns = (e.props && e.props.bodyColumns)
+            const columns = ((e.props && e.props.bodyColumns)
                 || (e.viewport && e.viewport.columns)
-                || 80;
+                || 80) - railCols;
 
             state.liveBar = !(e.surface === 'desktop' && typeof Svg === 'function');
 
@@ -1613,11 +1633,14 @@ export function register(on) {
                     ],
                 }));
             } else {
-                // The terminal: the same row in characters. The name has a
-                // fixed column so the bar starts in the same place on every
-                // redraw, and the bar takes what is left, up to forty cells.
-                const titleW = Math.max(8, Math.min(30, name.length + 2, Math.floor(columns / 3)));
-                const cells = Math.max(6, Math.min(40, columns - titleW - count.length - pct.length - 8));
+                // The terminal: the same row in characters. The bar is a fixed
+                // size for the window, so it starts in the same place on every
+                // redraw, and the step in hand takes all the width the bar
+                // does not need. (It used to be cut at thirty characters
+                // with most of the row empty beside it.)
+                const tier = columns >= 140 ? 40 : columns >= 110 ? 32 : columns >= 80 ? 20 : 12;
+                const cells = Math.max(6, Math.min(tier, columns - 12 - count.length - pct.length - 6));
+                const titleW = Math.max(8, columns - cells - count.length - pct.length - 6);
                 // Alive while Claude works, still when it is not: see planBarFrame.
                 const tick = Math.floor(Date.now() / BAR_FRAME_MS);
                 const pieces = planBarFrame(plan, { ascii: opts.ascii, cells, working: true, tick });
@@ -1648,6 +1671,28 @@ export function register(on) {
                         Text({ key: 'pg-p', dimColor: true, wrap: 'truncate', children: [pct] }),
                     ],
                 }));
+
+                // The steps around it: last finished, next two, and how many
+                // after. Only while the job is under way, and only where the
+                // window is tall enough to spare them.
+                if (!plan.complete) {
+                    const listed = planListRows(shown.items, {
+                        columns,
+                        rows: e.viewport && Number(e.viewport.rows) > 0 ? Number(e.viewport.rows) : 0,
+                        ascii: opts.ascii,
+                    });
+                    const look = { done: { color: PLAN_DONE }, rest: { dimColor: true }, faint: { dimColor: true }, dim: { dimColor: true }, fg: {} };
+                    listed.forEach((pieces, r) => rows.push(Box({
+                        key: 'hud-list-' + r,
+                        flexDirection: 'row',
+                        children: pieces.map((p, i) => Text({
+                            key: 'pl-' + r + '-' + i,
+                            wrap: 'truncate',
+                            ...(look[p.role] || {}),
+                            children: [p.text],
+                        })),
+                    })));
+                }
             }
         }
 
@@ -1771,7 +1816,36 @@ export function register(on) {
         // Nothing of ours to show: the sidebar has it all and there is no
         // follow-up or heads-up to offer. Leave the band to whoever else draws.
         if (!rows.length) return next(e);
-        const mine = rows.length === 1 ? rows[0] : Box({ flexDirection: 'column', children: rows });
+        // On the terminal every row of ours, however many lines it wraps to,
+        // has the HUD's colour down its left edge.
+        //
+        // A band may not switch off a border's sides (AbovePrompt refuses
+        // borderTop and its kind), so the edge is drawn, not bordered: a
+        // column of thin bars placed over the left column the rows leave
+        // free. Placed absolutely from the top to the bottom of the block, it
+        // takes the block's height whatever the rows wrap to, and the part of
+        // it that is longer than that is clipped. It changes nothing about
+        // where anything else sits.
+        const mine = railOn
+            ? Box({
+                key: 'hud-rail',
+                flexDirection: 'column',
+                paddingLeft: RAIL_COLS + RAIL_GAP,
+                children: [
+                    Box({
+                        key: 'hud-rail-bar',
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        bottom: 0,
+                        width: RAIL_COLS,
+                        overflow: 'hidden',
+                        children: [Text({ key: 'hud-rail-t', color: RAIL_COLOR, children: [railText(opts.ascii)] })],
+                    }),
+                    ...rows,
+                ],
+            })
+            : rows.length === 1 ? rows[0] : Box({ flexDirection: 'column', children: rows });
 
         // Keep whatever the mods after this one drew in the band, above
         // ours, rather than taking the band for ourselves.

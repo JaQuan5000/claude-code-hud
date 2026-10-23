@@ -135,6 +135,72 @@ export function progressOf(todos) {
     };
 }
 
+/** Below this many terminal lines the list under the bar is left out, so the prompt is never squeezed. */
+export const LIST_MIN_ROWS = 30;
+
+const LIST_ELLIPSIS = '\u2026';
+
+function cutTo(text, width) {
+    const chars = [...String(text)];
+    if (chars.length <= width) return chars.join('');
+    return chars.slice(0, Math.max(0, width - 1)).join('') + LIST_ELLIPSIS;
+}
+
+/**
+ * The steps around the one in hand, as rows of pieces for the terminal.
+ *
+ * The bar says how far along the job is; this says what is happening in it:
+ * the last step finished, the next one or two, and how many more come after
+ * them. At most four rows, none when the list is not a plan, nothing is left
+ * to do, or the window is too short to spare them.
+ *
+ * Each piece is `{ role, text }`, the role naming a look (done, rest, faint,
+ * dim, fg) and not a colour, so the colours stay in one place. Titles are cut
+ * to the width with an ellipsis; they were cleaned of control characters when
+ * they were read.
+ *
+ * "In hand" is the first item marked in progress. Where Claude marks nothing
+ * in progress, no step is singled out and the open steps are all "next".
+ */
+export function planListRows(items, { columns = 80, rows = 0, ascii = false } = {}) {
+    const list = Array.isArray(items) ? items.filter((t) => t && typeof t === 'object') : [];
+    if (list.length < MIN_PLAN) return [];
+    if (rows && rows < LIST_MIN_ROWS) return [];
+
+    const open = (t) => !['completed', 'done'].includes(statusOf(t));
+    const hand = list.findIndex((t) => ['in_progress', 'active', 'running'].includes(statusOf(t)));
+    const ahead = list.filter((t, i) => open(t) && i !== hand);
+    if (hand === -1 && !ahead.length) return [];
+
+    const wide = columns >= 100;
+    const showNext = wide ? 2 : 1;
+    const mark = { done: ascii ? 'v' : '\u2713', open: ascii ? 'o' : '\u25cb' };
+    const out = [];
+
+    // The last thing finished before the step in hand (or before the first open step).
+    const stop = hand === -1 ? list.findIndex(open) : hand;
+    let last = null;
+    for (let i = 0; i < stop; i += 1) if (!open(list[i])) last = list[i];
+    if (last && wide) {
+        const room = columns - 4;
+        out.push([{ role: 'done', text: '  ' + mark.done + ' ' }, { role: 'dim', text: cutTo(textOf(last), room) }]);
+    }
+
+    ahead.slice(0, showNext).forEach((t, i) => {
+        const lead = i === 0 ? 'next  ' : 'then  ';
+        const room = columns - 4 - lead.length;
+        out.push([
+            { role: 'rest', text: '  ' + mark.open + ' ' },
+            { role: 'faint', text: lead },
+            { role: 'fg', text: cutTo(textOf(t), room) },
+        ]);
+    });
+
+    const more = ahead.length - showNext;
+    if (more > 0) out.push([{ role: 'faint', text: '    + ' + more + ' more after that' }]);
+    return out;
+}
+
 /** `7/12`, which is the part people read before the percentage. */
 export function countText(plan) {
     if (!plan) return '';

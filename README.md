@@ -10,12 +10,16 @@ A **Claude Code mod** that cuts what a session costs and shows you where you sta
 - **Measures a destructive command before it runs.** `rm -rf build` tells you it is 1,240 files first.
 
 ```
- HUD  sonnet 5.5 · auto · base work                                     session resets in 56m 
-● Wiring the sidebar     ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
-Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
+▎  HUD  opus 5.5 · auto · deep work                                                  session resets in 56m  [-]
+▎ ● Wiring the consent banner events into the collector     ████████████▓▓▓░░░░░░░░░░░░░░░  Tasks 4/12  33%
+▎   ✓ Add the consent switch to Settings
+▎   ○ next  Respect consent before anything is sent
+▎   ○ then  Batch events and retry on failure
+▎     + 5 more after that
+▎ Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
 ```
 
-The first line is the [header bar](#the-terminal-header). The second is the progress bar, and appears only while Claude is working through a plan. `/hud help` explains all of it from inside Claude Code.
+The first line is the [header bar](#the-terminal-header). Under it, while Claude is working through a plan, the progress bar and the steps around the one in hand. Every row the HUD draws in the terminal carries a thin violet bar down its left edge, so what is the HUD and what is Claude's reply is plain at a glance. `/hud help` explains all of it from inside Claude Code.
 
 In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
 
@@ -181,6 +185,16 @@ base  sonnet 5.5  "add a column for last sync time"   [no signal]
 While Claude works through a multi-step job, a progress bar shows how far along it is, drawn the way [savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress) draws it. In the terminal:
 
 ```
+● Wiring the consent banner events into the collector     ████████████▓▓▓░░░░░░░░░░░░░░░  Tasks 4/12  33%
+  ✓ Add the consent switch to Settings
+  ○ next  Respect consent before anything is sent
+  ○ then  Batch events and retry on failure
+    + 5 more after that
+```
+
+The step in hand takes all the width the bar does not need, so it is read in full rather than cut at thirty characters. The bar is a fixed size for the window (forty cells on a wide one, fewer on a narrow one), so it starts in the same place on every redraw.
+
+Under it, the steps around the one in hand: the last one finished, the next two, and how many more come after them. In a narrow pane only the next step is listed, and in a window under thirty lines tall the list is left out so the prompt is never squeezed. Like the bar, it goes the moment Claude stops.
 ● Wiring the panel        █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
 ```
 
