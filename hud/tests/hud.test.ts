@@ -26,6 +26,7 @@ import { todosFrom, progressOf, countText, worthShowing, MIN_PLAN, applyTaskTool
 import { emptyStats, addTurn, cacheHit, moneyText, spanText, sessionOf, contextText, statsView } from '../hooks/hud-stats.js';
 import { planBar, planBarFrame, PLAN_ACCENT, PLAN_GLOW, PLAN_DONE, headerBar, HEADER_WIDE, BAND_BG, BAND_AMBER, BAND_CYAN, BADGE_BG } from '../hooks/hud-format.js';
 import { planSvg } from '../hooks/hud-svg.js';
+import { helpLines, topicFor, TOPICS, COMMANDS, VERBS } from '../hooks/hud-help.js';
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from '../hooks/hud-panel.js';
 import { spawned, shortName, addTokens, tokensOf, merge, visible, prune, shares, comparable,
     elapsedText, tokenText, statusColor, LINGER_MS } from '../hooks/hud-agents.js';
@@ -2439,9 +2440,35 @@ test('it says tasks were seen but there is no bar, and why that is correct', asy
 
 test('it says the bar should be showing when there is a live plan', async () => {
     const plan = { total: 4, done: 1, doing: 1, percent: 25, complete: false };
-    const text = planReport({ seen: { ...none, TaskCreate: 4, TaskUpdate: 2, last: 'TaskUpdate' }, tasks: [{}, {}, {}, {}], plan }).join('\n');
+    const text = planReport({ seen: { ...none, TaskCreate: 4, TaskUpdate: 2, last: 'TaskUpdate' }, tasks: [{}, {}, {}, {}], plan, working: true }).join('\n');
     expect(text.includes('1/4 done (25%)')).toBe(true);
     expect(text.includes('The bar should be showing')).toBe(true);
+    expect(text.includes('Claude is working now')).toBe(true);
+});
+
+test('when Claude is idle it says the bar is hidden on purpose, and lists the tasks that are still open', async () => {
+    const plan = { total: 3, done: 1, doing: 0, percent: 33, complete: false };
+    const items = [
+        { content: 'Read the code', status: 'completed' },
+        { content: 'Write the fix', status: 'pending' },
+        { content: 'Run the tests', status: 'in_progress' },
+    ];
+    const text = planReport({ seen: { ...none, TaskCreate: 3, last: 'TaskCreate' }, tasks: [{}, {}, {}], plan, items, working: false }).join('\n');
+    expect(text.includes('Claude is idle')).toBe(true);
+    expect(text.includes('the bar is hidden')).toBe(true);
+    expect(text.includes('[done]  Read the code')).toBe(true);
+    expect(text.includes('[todo]  Write the fix')).toBe(true);
+    expect(text.includes('[doing] Run the tests')).toBe(true);
+    expect(text.includes('left unfinished on its list')).toBe(true);
+});
+
+test('a very long list is cut, with a count of what was left out', async () => {
+    const items = [];
+    for (let i = 0; i < 60; i += 1) items.push({ content: 'task ' + i, status: 'pending' });
+    const text = planReport({ seen: { ...none, TaskCreate: 60 }, tasks: items, plan: { total: 60, done: 0, doing: 0, percent: 0, complete: false }, items, working: false }).join('\n');
+    expect(text.includes('and 20 more')).toBe(true);
+    expect(text.includes('task 39')).toBe(true);
+    expect(text.includes('task 40')).toBe(false);
 });
 
 test('it says when the plan is finished and the bar has gone', async () => {
@@ -2781,6 +2808,15 @@ function hookOf(h, event, matcherTest) {
     return h.hooks.find((x) => x.event === event && (!matcherTest || matcherTest(x.matcher)));
 }
 
+/** Claude starts a turn: the bar and the sidebar's progress card only show while it is working. */
+const working = (h) => hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'carry on with the job' }, h.next);
+/** And the turn ends. */
+const idle = async (h) => {
+    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'x' }) };
+    h.ctx.prompt = { submit: () => undefined };
+    await hookOf(h, 'turn.complete').handler(h.ctx, { answer: 'done', isAborted: false, durationMs: 1000 }, async () => ({ text: 'x' }));
+};
+
 test('the prompt gets one section added last, in the session half of the cache', async () => {
     const h = await sidebarSession({});
     await h.say('track on');
@@ -2872,6 +2908,7 @@ test('a restarted session finds its plan again, from the transcript', async () =
         asst(update('1', 'completed')),
     ];
     await h.start();
+    await working(h);
     const tree = await h.pane('desktop');
     expect(hasKey(tree, 'card-progress')).toBe(true);
     expect((await h.say('plan')).text.includes('1/3 done')).toBe(true);
@@ -2883,11 +2920,13 @@ test('a session that starts empty has no plan, even if one was showing', async (
     const h = await sidebarSession({ surfaces: ['desktop'], placed: true });
     h.ctx.session.messages = async () => [asst(create('a', '1'), create('b', '2'))];
     await h.start();
+    await working(h);
     expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
 
     // /clear: the same module, a session with nothing in it.
     h.ctx.session.messages = async () => [];
     await h.start();
+    await working(h);
     expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(false);
 });
 
@@ -2897,6 +2936,7 @@ test('an unreadable transcript leaves the plan as it was', async () => {
     await h.start();
     h.ctx.session.messages = async () => { throw new Error('no transcript'); };
     await h.start();
+    await working(h);
     expect(hasKey(await h.pane('desktop'), 'card-progress')).toBe(true);
 });
 
@@ -4039,24 +4079,57 @@ test('Claude working moves the bar, and the end of its turn stops it', async () 
     await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }, { title: 'c', status: 'todo' }]);
     const frame = h.ticks[0];
     expect(frame.ms <= 250).toBe(true);
-    const before = h.invalidated;
-    // Idle: the clock ticks and nothing is redrawn.
+    // A step was just reported, so Claude is at work: the bar is alive.
     await barRow(h);
-    frame.fn(); frame.fn();
-    expect(h.invalidated).toBe(before);
-    // A request goes out: the bar is alive.
-    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'please do the three things' }, h.next);
-    await barRow(h);
-    const working = h.invalidated;
+    const working1 = h.invalidated;
     frame.fn(); frame.fn(); frame.fn();
-    expect(h.invalidated).toBe(working + 3);
-    // Its answer lands: still again.
-    h.ctx.model = { complete: async () => ({ isAnswered: false, reason: 'x' }) };
-    h.ctx.prompt = { submit: () => undefined };
-    await hookOf(h, 'turn.complete').handler(h.ctx, { answer: 'done', isAborted: false, durationMs: 1000 }, async () => ({ text: 'x' }));
-    const idle = h.invalidated;
+    expect(h.invalidated).toBe(working1 + 3);
+    // Its answer lands: the bar goes and the clock redraws nothing.
+    await idle(h);
+    const stillAt = h.invalidated;
     frame.fn(); frame.fn();
-    expect(h.invalidated).toBe(idle);
+    expect(h.invalidated).toBe(stillAt);
+    expect(!!(await barRow(h))).toBe(false);
+    // Its next request: back, with the same counts.
+    await working(h);
+    const back = await barRow(h);
+    expect(!!back).toBe(true);
+    expect(textsOf(back).includes('Tasks 1/3')).toBe(true);
+    const n = h.invalidated;
+    frame.fn(); frame.fn();
+    expect(h.invalidated).toBe(n + 2);
+});
+
+test('a bar left at 6 of 9 under a finished answer is not shown: it is hidden when Claude stops, and listed in /hud plan', async () => {
+    const h = await barSession();
+    const steps = [];
+    for (let i = 0; i < 9; i += 1) steps.push({ title: 'step ' + i, status: i < 6 ? 'done' : 'todo' });
+    await write(h, steps);
+    expect(textsOf(await barRow(h)).includes('Tasks 6/9')).toBe(true);
+    await idle(h);
+    expect(!!(await barRow(h))).toBe(false);
+    const text = (await h.say('plan')).text;
+    expect(text.includes('Claude is idle')).toBe(true);
+    expect(text.includes('[todo]  step 8')).toBe(true);
+    expect(text.includes('plan: 6/9 done')).toBe(true);
+});
+
+test('a tool call from the main thread is Claude working, even if the prompt was never seen', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }]);
+    await idle(h);
+    expect(!!(await barRow(h))).toBe(false);
+    // A queued message or a resumed turn: no prompt.submit, only work.
+    await callHook(h).handler(h.ctx, { tool: 'Bash', command: 'ls' }, ok());
+    expect(!!(await barRow(h))).toBe(true);
+});
+
+test('a subagent\'s tool calls do not make an idle main session look busy', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }]);
+    await idle(h);
+    await callHook(h).handler(h.ctx, { tool: 'Bash', command: 'ls', agentId: 'sub-1' }, ok());
+    expect(!!(await barRow(h))).toBe(false);
 });
 
 test('an aborted turn stops the bar too', async () => {
@@ -4072,17 +4145,16 @@ test('an aborted turn stops the bar too', async () => {
     expect(h.invalidated).toBe(n);
 });
 
-test('while Claude works the terminal bar differs from frame to frame, and when idle it does not', async () => {
+test('while Claude works the terminal bar differs from frame to frame', async () => {
     const h = await barSession();
     await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'done' }, { title: 'c', status: 'doing' }, { title: 'd', status: 'todo' }]);
     const sig = async () => JSON.stringify(find(await h.band('terminal'), 'pg-bar'));
-    const idleA = await sig();
-    await sleep3(260);
-    expect(await sig()).toBe(idleA);
-    await hookOf(h, 'prompt.submit').handler(h.ctx, { text: 'go' }, h.next);
     const seen = new Set();
     for (let i = 0; i < 8; i += 1) { seen.add(await sig()); await sleep3(210); }
     expect(seen.size > 1).toBe(true);
+    // And once it stops there is no bar to move.
+    await idle(h);
+    expect(await sig()).toBe('null');
 });
 const sleep3 = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -4107,4 +4179,125 @@ test('a step title is words only: control characters cannot reach the terminal, 
     expect(/[\u0000-\u001f\u007f-\u009f]/.test(steps[0].content)).toBe(false);
     expect(steps[0].content.startsWith('Run')).toBe(true);
     expect(steps[1].content.length).toBe(200);
+});
+
+
+// ---- /hud help
+
+const everyHelpPage = () => [helpLines('').join('\n'), ...TOPICS.map((t) => helpLines(t).join('\n'))];
+
+test('/hud help gives the whole guide, and the guide names every page', async () => {
+    const h = await barSession();
+    const text = (await h.say('help')).text;
+    expect(text.startsWith('hud:')).toBe(true);
+    for (const page of TOPICS) expect(text.includes(page)).toBe(true);
+    expect(text.includes('WHAT YOU SEE')).toBe(true);
+    expect(text.includes('COMMANDS')).toBe(true);
+});
+
+test('/hud help lists every command, and each one it lists is a verb the command answers', async () => {
+    const guide = helpLines('').join('\n');
+    for (const [verb] of COMMANDS) {
+        expect(guide.includes('/hud ' + verb)).toBe(true);
+        const first = verb.split(' ')[0];
+        if (first) expect(VERBS.includes(first)).toBe(true);
+    }
+    // And the plain usage at the foot of /hud lists help too.
+    const h = await barSession();
+    expect((await h.say('')).text.includes('/hud help')).toBe(true);
+});
+
+test('every command a help page tells you to type exists', async () => {
+    const seen = new Set();
+    for (const page of everyHelpPage()) {
+        for (const m of page.matchAll(/\/hud ([a-z]+)/g)) seen.add(m[1]);
+    }
+    expect(seen.size > 8).toBe(true);
+    for (const verb of seen) expect(VERBS.includes(verb)).toBe(true);
+});
+
+test('every verb the help promises is answered by something other than the status screen', async () => {
+    const h = await barSession();
+    for (const verb of ['help', 'models', 'log', 'tune', 'plan', 'track', 'agents', 'suggest', 'know', 'blast', 'confirm', 'raw']) {
+        const text = (await h.say(verb)).text;
+        expect(typeof text).toBe('string');
+        expect(text.startsWith('routing:')).toBe(false);
+    }
+});
+
+test('/hud help <topic> gives one page, by its name or by a word people try', async () => {
+    const h = await barSession();
+    const bar = (await h.say('help bar')).text;
+    expect(bar.startsWith('THE PROGRESS BAR')).toBe(true);
+    expect(bar.includes('/hud plan')).toBe(true);
+    expect(bar.includes('COMMANDS')).toBe(false);
+    for (const word of ['progress', 'plan', 'tasks', 'tracking']) expect(topicFor(word)).toBe('bar');
+    for (const word of ['blast', 'guard', 'destructive']) expect(topicFor(word)).toBe('safety');
+    for (const word of ['pace', 'limits', 'confirm']) expect(topicFor(word)).toBe('quota');
+    expect(topicFor('Routing!')).toBe('routing');
+    expect(topicFor('')).toBe(null);
+    expect((await h.say('help best')).text.startsWith('GETTING THE MOST')).toBe(true);
+});
+
+test('an unknown help topic points at the real ones and echoes nothing dangerous', async () => {
+    const h = await barSession();
+    const esc = String.fromCharCode(27);
+    const text = (await h.say('help zzz' + esc + '[2Jqq')).text;
+    expect(text.includes('No help page')).toBe(true);
+    expect(text.includes('Pages: ')).toBe(true);
+    expect(text.includes(esc)).toBe(false);
+    for (const page of TOPICS) expect(text.includes(page)).toBe(true);
+});
+
+test('the help is words only: no em dashes, no control characters, and no line too wide to read', async () => {
+    for (const page of everyHelpPage()) {
+        expect(page.includes(String.fromCharCode(0x2014))).toBe(false);
+        expect(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(page)).toBe(false);
+        for (const line of page.split('\n')) expect(line.length <= 125).toBe(true);
+    }
+});
+
+test('asking for help changes nothing: routing, switches and the plan stay as they were', async () => {
+    const h = await barSession();
+    await write(h, [{ title: 'a', status: 'done' }, { title: 'b', status: 'doing' }]);
+    const before = (await h.say('')).text;
+    const plan = (await h.say('plan')).text;
+    await h.say('help');
+    await h.say('help tips');
+    await h.say('help nonsense');
+    expect((await h.say('')).text).toBe(before);
+    expect((await h.say('plan')).text).toBe(plan);
+});
+
+test('the guide lists every verb the command answers, not just the ones in its own table', async () => {
+    const guide = helpLines('').join('\n');
+    for (const verb of VERBS) {
+        if (verb === 'on' || verb === 'heads') continue;   // 'on' is the old name of 'auto', 'heads' of 'know'
+        expect(guide.includes(verb === 'auto' ? '| auto' : '/hud ' + verb)).toBe(true);
+    }
+});
+
+test('every page the guide and the pages point at exists', async () => {
+    const pages = [helpLines('').join('\n'), ...TOPICS.map((t) => helpLines(t).join('\n'))];
+    const named = new Set();
+    for (const page of pages) {
+        for (const m of page.matchAll(/\(help ([a-z]+)\)/g)) named.add(m[1]);
+        for (const m of page.matchAll(/\/hud help ([a-z]+)/g)) named.add(m[1]);
+    }
+    expect(named.size > 4).toBe(true);
+    for (const word of named) expect(topicFor(word) !== null).toBe(true);
+});
+
+test('every wording of the request asks Claude to make the list true before it stops', async () => {
+    // The task tools offered: the reminder to finish is in the system prompt note.
+    expect(trackingNudge(['Bash', 'TaskCreate', 'TaskUpdate']).includes('make the list true')).toBe(true);
+    expect(trackingNudge(['Bash', 'TodoWrite']).includes('make the list true')).toBe(true);
+    expect(trackingNudge(['Bash', 'ToolSearch']).includes('make the list true')).toBe(true);
+    // The mid-job reminder says it too, whichever list it points at.
+    expect(reminderText(['TaskCreate', 'TaskUpdate']).includes('before you stop')).toBe(true);
+    expect(reminderText(['TodoWrite']).includes('before you stop')).toBe(true);
+    expect(reminderText(['Bash']).includes('one last time before you stop')).toBe(true);
+    // And the hud tool's own description, which is all Claude sees of it.
+    const h = await barSession();
+    expect(h.registered.some((t) => String(t.description).includes('one last time before you stop'))).toBe(true);
 });

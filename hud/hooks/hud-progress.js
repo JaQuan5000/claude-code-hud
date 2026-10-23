@@ -281,7 +281,7 @@ export function todosFromTasks(tasks) {
  * `seen` is how many calls of each plan tool have gone past this session;
  * `tracking` is whether Claude is being asked to keep a task list.
  */
-export function planReport({ seen, tasks, plan, tracking }) {
+export function planReport({ seen, tasks, plan, tracking, items, working }) {
     const counts = seen || {};
     const total = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'progress']
         .reduce((n, k) => n + (counts[k] || 0), 0);
@@ -300,7 +300,22 @@ export function planReport({ seen, tasks, plan, tracking }) {
         + ', TodoWrite ' + (counts.TodoWrite || 0)
         + ', progress ' + (counts.progress || 0)
         + (counts.last ? ', last was ' + counts.last : ''));
+    lines.push('Claude is ' + (working ? 'working now' : 'idle'));
     lines.push('');
+
+    // The list itself, so a count that looks wrong can be checked against what is on it.
+    const listed = Array.isArray(items) ? items.filter((i) => i && typeof i === 'object') : [];
+    if (listed.length) {
+        lines.push('the list, as the bar counts it:');
+        for (const item of listed.slice(0, 40)) {
+            const s = statusName(item.status);
+            const mark = s === 'completed' || s === 'done' ? '[done] ' : s === 'in_progress' || s === 'doing' ? '[doing]' : '[todo] ';
+            const text = String(item.content || item.activeForm || item.subject || '(no name)').replace(/\s+/g, ' ').slice(0, 90);
+            lines.push('  ' + mark + ' ' + text);
+        }
+        if (listed.length > 40) lines.push('  ... and ' + (listed.length - 40) + ' more');
+        lines.push('');
+    }
 
     if (total === 0) {
         lines.push('No plan tool has been called in this session, so there is nothing to draw.');
@@ -318,6 +333,9 @@ export function planReport({ seen, tasks, plan, tracking }) {
         lines.push('and the bar goes the moment the last one is done.');
     } else if (plan.complete) {
         lines.push('The plan is finished, so the bar has gone. It returns with the next job.');
+    } else if (!working) {
+        lines.push('Claude is idle, so the bar is hidden: it shows only while Claude is working, and comes back with its next step.');
+        lines.push('Anything above marked todo or doing is a task Claude left unfinished on its list, whether or not the work was done.');
     } else {
         lines.push('The bar should be showing' + ' above the strip, or in the sidebar on the desktop.');
     }
@@ -432,7 +450,7 @@ export function trackingNudge(tools) {
         + 'or when you are carrying out a written plan, create the task list: ';
     const tail = ' Keep the list in the main conversation even when the steps are handed to subagents, and update it '
         + 'as each step\'s work is accepted. The person watches a progress bar that counts exactly these tasks, '
-        + 'so work without them is invisible to them. Skip this for questions and single small edits.';
+        + 'so work without them is invisible to them. ' + FINISH + ' Skip this for questions and single small edits.';
 
     // Where there is no task tool to be had and nothing to look for one with, the mod's own is the one that is always there.
     if (!hasTasks && !hasTodos && !canLoad) return lead + HUD_STEPS + tail;
@@ -448,9 +466,22 @@ export function trackingNudge(tools) {
         + 'with exactly one in_progress at a time.' + tail;
 }
 
+/**
+ * What Claude is asked to do before it stops, in every wording of the request.
+ *
+ * The bar counts the list as written, so a job that is finished in fact and
+ * unfinished on paper shows as unfinished: tasks left pending that Claude did,
+ * or decided not to do, or that belong to an earlier job. Asking for a true
+ * list at the end is what keeps the bar from claiming work that is not there.
+ */
+const FINISH = 'Before you finish a turn, make the list true: mark every task you did as completed, and delete every '
+    + 'task you decided not to do or that belongs to an earlier job (TaskUpdate with status deleted, or leave it out of the next '
+    + 'list), so nothing is left pending that you are not going to do.';
+
 /** How to use the mod's own tool, said once. */
 const HUD_STEPS = 'call ' + HUD_TOOL + ' with every step of the job, each with a status of todo, doing or done, and call it again with the '
-    + 'whole list every time a step starts and every time one finishes, with exactly one step doing at a time.';
+    + 'whole list every time a step starts and every time one finishes, with exactly one step doing at a time. '
+    + 'Call it one last time before you stop, with every step done and any step you dropped left out.';
 /** Said beside the task tools, for the sessions where ToolSearch finds none. */
 const HUD_FALLBACK = ' If ToolSearch finds no such tools, ' + HUD_STEPS + ' ';
 
@@ -513,7 +544,8 @@ export function reminderText(tools) {
             ? 'if TaskCreate and TaskUpdate are not loaded yet, load them with ToolSearch (query "select:TaskCreate,TaskUpdate"), then '
             : '';
         return lead + load + 'call TaskCreate for each, mark the one you are on in_progress with TaskUpdate, and mark each '
-            + 'completed as it is done.' + (canLoad ? HUD_FALLBACK.trimEnd() : '');
+            + 'completed as it is done, and before you stop mark every task done or delete it.' + (canLoad ? HUD_FALLBACK.trimEnd() : '');
     }
-    return lead + 'write them with TodoWrite, with exactly one in_progress, and write the list again as each one finishes.';
+    return lead + 'write them with TodoWrite, with exactly one in_progress, write the list again as each one finishes, '
+        + 'and write it once more before you stop with every finished item completed and any dropped item left out.';
 }

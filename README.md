@@ -15,7 +15,7 @@ A **Claude Code mod** that cuts what a session costs and shows you where you sta
 Ctx [██▌·····]  31% │ Session [█▌······]  18% ↻ 1h41m │ Week [████▍···]  55% ↻ 3d,11h
 ```
 
-The first line is the [header bar](#the-terminal-header). The second is the progress bar, and appears only while Claude is working through a plan.
+The first line is the [header bar](#the-terminal-header). The second is the progress bar, and appears only while Claude is working through a plan. `/hud help` explains all of it from inside Claude Code.
 
 In the **Desktop app** it draws the same readings as real vector gauges instead - rounded track, continuous fill, and a colour that slides from green through amber to red along its length - because the desktop can render SVG and there is no reason to make it imitate a terminal. The mod checks which app is drawing and picks the better of the two automatically.
 
@@ -184,7 +184,7 @@ While Claude works through a multi-step job, a progress bar shows how far along 
 ● Wiring the panel        █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░  Tasks 4/12  33%
 ```
 
-Solid blocks are the work finished, a medium shade is the step in hand, and the light shade is what is left, all in one periwinkle blue (savvy-progress's) and green once the job is done. **While Claude is working the bar is alive**: a lighter band runs along the finished part, the step in hand breathes between two shades, and the dot beside the title pulses. The moment its turn ends, or you interrupt it, everything stops and the title dims, so a bar standing still means nobody is working on it. In the desktop app the bar is a picture: a dithered fill that thickens towards its head, a faint layer for the task in hand, a tick where each task still ahead begins, and the count on a pill riding the head of the fill. The colours are deliberately not the quota bars' green-amber-red: those measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
+Solid blocks are the work finished, a medium shade is the step in hand, and the light shade is what is left, all in one periwinkle blue (savvy-progress's) and green once the job is done. **While Claude is working the bar is alive**: a lighter band runs along the finished part, the step in hand breathes between two shades, and the dot beside the title pulses. The moment its turn ends, or you interrupt it, the bar goes (see [Why the bar goes when Claude stops](#why-the-bar-goes-when-claude-stops)). In the desktop app the bar is a picture: a dithered fill that thickens towards its head, a faint layer for the task in hand, a tick where each task still ahead begins, and the count on a pill riding the head of the fill. The colours are deliberately not the quota bars' green-amber-red: those measure how close you are to a limit, and progress is not a limit - a job at 90% is nearly done, not nearly in trouble.
 
 The total comes from the steps Claude itself writes down before it starts and updates as each one lands. Nothing in the bar is estimated, and the mod never guesses a plan: no steps written, no bar. An earlier version asked a small model to work a plan out from the work and drew it with a tilde; it showed "4 of 9" under a finished answer with both numbers invented, so it was removed. That is also why it only appears when there is a plan: two tasks or more, not one, and it goes the moment the last one is done. It reads three ways Claude can keep that list: the `progress` tool this mod adds (see [Plan tracking](#plan-tracking)), the whole-list `TodoWrite` tool, and the `TaskCreate` and `TaskUpdate` tools an interactive session uses to add and tick off one task at a time. It never changes or delays a task call, and it sends nothing anywhere.
 
@@ -193,6 +193,14 @@ If you never see it, run `/hud plan`. It says how many task calls the mod has ac
 The usual reason is the first. The bar can only count a list Claude writes down, and a job carried out without one has nothing to count. That is not a fault in the bar, so the mod makes the list easy to write: see [Plan tracking](#plan-tracking).
 
 A restarted or resumed session finds its plan again. The mod reads the task calls back out of the transcript when it starts, so the bar is there straight away instead of after the next task call.
+
+### Why the bar goes when Claude stops
+
+A bar that stays up under a finished answer and says 6/9 is claiming that three jobs are outstanding, and often none are: Claude did the work and never ticked the task, or dropped a step, or the list is left over from an earlier job in the same session. The bar counts the list as written, so it cannot tell. So it is shown only while Claude is working, and comes back with the same counts the moment Claude takes its next step.
+
+Two things keep the list honest. The mod asks Claude to make the list true before it stops (mark what it did as done, delete what it decided not to do or that belongs to an earlier job), in the system prompt note, in the mid-job reminder and in the `progress` tool's own description. And `/hud plan` lists every task with a `[done]`, `[doing]` or `[todo]` mark, so a count that looks wrong can be checked against the list in one command: a `[todo]` on a job that is finished is a task Claude never ticked.
+
+Claude counts as working from its first tool call of a turn, however the turn began (a typed prompt, a queued message, a resumed session). A subagent's tool calls do not count.
 
 ## Plan tracking
 
@@ -303,7 +311,8 @@ It only looks at turns big enough to hide a mistake in - several tool calls, or 
 | `/hud know on` / `off` | The heads-up check after a big turn |
 | `/hud confirm on` / `off` | The question near the limit, asked once per window |
 | `/hud panel` / `panel off` | The desktop sidebar: open it, or close it and put the strip back |
-| `/hud plan` | What the progress bar has seen, and why it is or is not showing |
+| `/hud help` | Everything the mod does and how to use it best. `/hud help <topic>` gives one page: `bar`, `routing`, `quota`, `safety`, `agents`, `extras`, `panel`, `tips` |
+| `/hud plan` | What the progress bar has seen, the task list itself, and why the bar is or is not showing |
 | `/hud track on` / `off` | Asking Claude to keep a task list for long jobs, so the bar has something to count |
 | `/hud blast on` / `off` | Measuring a destructive command before it runs |
 | `/hud raw` | What `usage()` reported, if a reading is missing from the strip |

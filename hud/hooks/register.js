@@ -33,6 +33,7 @@ import { todosFrom, stepsFrom, progressOf, countText, worthShowing, applyTaskToo
 import { buildPanel, PANE_ID, DEFAULT_COLLAPSED } from './hud-panel.js';
 import { emptyStats, addTurn, sessionOf, contextText, statsView, moneyText, spanText } from './hud-stats.js';
 import { projectionText } from './hud-pace.js';
+import { helpLines } from './hud-help.js';
 
 /**
  * What the strip draws from.
@@ -383,6 +384,10 @@ async function hudCommand($, e) {
         };
     }
 
+    if (verb === 'help' || verb === '?' || verb === 'guide') {
+        return { text: helpLines(words.slice(1).join(' ')).join('\n') };
+    }
+
     if (verb === 'know' || verb === 'heads') {
         const how = (words[1] || '').toLowerCase();
         if (how === 'off') {
@@ -437,7 +442,8 @@ async function hudCommand($, e) {
 
     if (verb === 'plan') {
         return {
-            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan, tracking: state.trackOn }).join('\n'),
+            text: planReport({ seen: state.planSeen, tasks: state.tasks, plan: state.plan, tracking: state.trackOn,
+                items: state.planItems, working: state.working }).join('\n'),
         };
     }
 
@@ -552,6 +558,7 @@ async function hudCommand($, e) {
     }
     lines.push('');
     lines.push('');
+    lines.push('  /hud help [topic]        everything the mod does and how to use it best');
     lines.push('  /hud off | auto          stop routing, or hand the choice back');
     lines.push('  /hud models              every model a tier can be set to');
     lines.push('  /hud set <tier> <model>  point one tier somewhere else');
@@ -723,7 +730,13 @@ async function restorePlan($) {
  * answer, with the 9 and the 4 both invented. No steps written, no bar.
  */
 function shownPlan() {
-    if (worthShowing(state.plan)) return { plan: state.plan, items: state.planItems };
+    // Only while Claude is working. When it stops, a list that still has
+    // tasks pending is not progress being made: it is either work waiting on
+    // you, or tasks Claude finished without ticking or never meant to do, and
+    // a bar that stands there saying 6/9 under a finished answer claims work
+    // that is not there. The list is kept, so the bar is back, with the same
+    // counts, the moment Claude takes its next step; `/hud plan` lists it.
+    if (state.working && worthShowing(state.plan)) return { plan: state.plan, items: state.planItems };
     return { plan: null, items: [] };
 }
 
@@ -833,7 +846,7 @@ export function register(on) {
         await $.command.register({
             name: 'hud',
             description: 'Show what hud is doing, change a tier, or turn routing on and off',
-            argumentHint: '[on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|track|agents]',
+            argumentHint: '[help|on|off|auto|models|set|log|tune|suggest|know|blast|confirm|panel|plan|track|agents]',
         });
 
         // What you switched off last time stays off.
@@ -848,6 +861,7 @@ export function register(on) {
                 description: 'Report the steps of the current job to the progress bar the person is watching. '
                     + 'Call it with every step, each with a status of todo, doing or done, before the first tool call of a job of three or more steps, '
                     + 'and again with the whole list each time a step starts and each time one finishes, with exactly one step doing at a time. '
+                    + 'Call it one last time before you stop, with every step done and any step you dropped left out. '
                     + 'The bar counts these steps and nothing else. Skip it for a question or a single small edit.',
                 inputSchema: {
                     type: 'object',
@@ -877,7 +891,7 @@ export function register(on) {
         // The terminal's bar moves while Claude works. One timer, asked for
         // once, and quiet unless a bar is on screen and a turn is running.
         $.clock.every(BAR_FRAME_MS, () => {
-            if (state.working && state.liveBar && worthShowing(state.plan)) $.ui.invalidate('ui.render');
+            if (state.liveBar && shownPlan().plan) $.ui.invalidate('ui.render');
         });
 
         // A reload or a resume starts this module with nothing, while the
@@ -1117,6 +1131,7 @@ export function register(on) {
         try {
             // A subagent's todo list is its own, not the job you are watching.
             if (!e.agentId) {
+                state.working = true;
                 state.planSeen.TodoWrite += 1;
                 state.planSeen.last = 'TodoWrite';
                 const list = todosFrom(e);
@@ -1140,6 +1155,7 @@ export function register(on) {
     // conversation's only; a subagent's steps are its own.
     on('tool.call', { tool: HUD_TOOL }, async ($, e) => {
         if (e.agentId) return { result: 'ignored: only the main session reports the steps of the job' };
+        state.working = true;
         const list = stepsFrom(e);
         const plan = progressOf(list);
         state.planSeen.progress += 1;
@@ -1176,6 +1192,10 @@ export function register(on) {
     // in the middle of the work, once the job has run for a while with no
     // plan; see reminderStep for how often. It never changes the result.
     on('tool.call', async ($, e, next) => {
+        // A main-thread tool call is Claude at work, however the turn began
+        // (a queued message, a resumed session): the bar must not depend on
+        // having seen the prompt go out.
+        if (!e.agentId) state.working = true;
         const result = await next(e);
         try {
             // A subagent's work is its own, and a refused or failed call
@@ -1241,6 +1261,7 @@ export function register(on) {
             // A subagent's task list is its own, not the job you are watching.
             if (e.agentId) return result;
             try {
+                state.working = true;
                 state.planSeen[tool] += 1;
                 state.planSeen.last = tool;
                 state.tasks = applyTaskTool(state.tasks, tool, e, result);
@@ -1599,9 +1620,9 @@ export function register(on) {
                 const cells = Math.max(6, Math.min(40, columns - titleW - count.length - pct.length - 8));
                 // Alive while Claude works, still when it is not: see planBarFrame.
                 const tick = Math.floor(Date.now() / BAR_FRAME_MS);
-                const pieces = planBarFrame(plan, { ascii: opts.ascii, cells, working: state.working, tick });
-                // The dot breathes with the bar, and goes dim when nobody is working on it.
-                const dotDim = state.working ? Math.floor(tick / 3) % 2 === 1 : true;
+                const pieces = planBarFrame(plan, { ascii: opts.ascii, cells, working: true, tick });
+                // The dot breathes with the bar. (The row is drawn only while Claude is working.)
+                const dotDim = Math.floor(tick / 3) % 2 === 1;
                 rows.push(Box({
                     key: 'hud-progress',
                     flexDirection: 'row',
@@ -1614,7 +1635,7 @@ export function register(on) {
                             flexDirection: 'row',
                             children: [
                                 Text({ key: 'pg-i', color, dimColor: dotDim, children: [opts.ascii ? '* ' : '● '] }),
-                                Text({ key: 'pg-n', dimColor: !state.working, wrap: 'truncate-end', children: [name] }),
+                                Text({ key: 'pg-n', wrap: 'truncate-end', children: [name] }),
                             ],
                         }),
                         Box({
